@@ -38,7 +38,7 @@ def ensure_users_table_exists():
             """
             IF NOT EXISTS (SELECT * FROM sys.tables WHERE name='Users')
             CREATE TABLE Users (
-                id INT IDENTITY(1,1) PRIMARY KEY,
+                user_id INT IDENTITY(1,1) PRIMARY KEY,
                 user_email NVARCHAR(255) NOT NULL UNIQUE,
                 user_password NVARCHAR(512) NOT NULL,
                 user_firstname NVARCHAR(100) NULL,
@@ -68,6 +68,75 @@ def ensure_users_table_exists():
             """
         )
         conn.commit()
+
+
+def ensure_products_table_exists():
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            IF NOT EXISTS (SELECT * FROM sys.tables WHERE name='Products')
+            CREATE TABLE Products (
+                prod_id INT IDENTITY(1,1) PRIMARY KEY,
+                prod_name NVARCHAR(255) NOT NULL,
+                prod_price FLOAT NOT NULL,
+                prod_image NVARCHAR(512) NULL
+            );
+            """
+        )
+        # Add missing columns if table already exists
+        cursor.execute("SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME='Products'")
+        existing_columns = {row[0].lower() for row in cursor.fetchall()}
+
+        if 'prod_image' not in existing_columns:
+            cursor.execute("ALTER TABLE Products ADD prod_image NVARCHAR(512) NULL")
+
+        conn.commit()
+
+
+def get_products() -> list:
+    ensure_products_table_exists()
+
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME='Products'")
+        existing_columns = {row[0].lower() for row in cursor.fetchall()}
+
+        name_col = 'prod_name' if 'prod_name' in existing_columns else ('name' if 'name' in existing_columns else None)
+        price_col = 'prod_price' if 'prod_price' in existing_columns else ('price' if 'price' in existing_columns else None)
+        id_col = 'prod_id' if 'prod_id' in existing_columns else ('id' if 'id' in existing_columns else None)
+        image_col = 'prod_image' if 'prod_image' in existing_columns else ('image' if 'image' in existing_columns else None)
+
+        if not name_col or not price_col:
+            raise ValueError('Products table must contain prod_name/name and prod_price/price columns.')
+
+        selected_columns = [name_col, price_col]
+        if image_col:
+            selected_columns.append(image_col)
+
+        order_by = id_col if id_col else name_col
+
+        query = f"SELECT {', '.join(selected_columns)} FROM Products ORDER BY {order_by}"
+        cursor.execute(query)
+        rows = cursor.fetchall()
+
+    products = []
+    for r in rows:
+        product = {
+            'prod_name': r[0],
+            'prod_price': float(r[1]),
+            'prod_image': ''
+        }
+        if image_col:
+            product['prod_image'] = r[2] if len(r) > 2 and r[2] is not None else ''
+
+        # if image path is relative filename, prefix assets/products/
+        if product['prod_image'] and not product['prod_image'].lower().startswith('http') and not product['prod_image'].startswith('/'):
+            product['prod_image'] = 'assets/products/' + product['prod_image']
+
+        products.append(product)
+
+    return products
 
 
 def register_user(email: str, password: str, first_name: str = '', last_name: str = '') -> dict:
@@ -155,41 +224,6 @@ def register_endpoint():
     return jsonify(result), status
 
 
-@app.route('/products', methods=['GET'])
-def products_endpoint():
-    # Ensure the Products table exists for dynamic demo. If not, create with basic fields.
-    with get_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            """
-            IF NOT EXISTS (SELECT * FROM sys.tables WHERE name='Products')
-            CREATE TABLE Products (
-                id INT IDENTITY(1,1) PRIMARY KEY,
-                prod_name NVARCHAR(255) NOT NULL,
-                prod_price DECIMAL(18,2) NOT NULL,
-                prod_image NVARCHAR(512) NULL
-            )
-            """
-        )
-        conn.commit()
-
-    with get_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT prod_name, prod_price, prod_image FROM Products")
-        rows = cursor.fetchall()
-
-    products = []
-    for row in rows:
-        name, price, image = row
-        products.append({
-            'name': name,
-            'price': float(price),
-            'image': image or ''
-        })
-
-    return jsonify(products)
-
-
 @app.route('/login', methods=['POST'])
 def login_endpoint():
     data = request.get_json(force=True, silent=True)
@@ -202,6 +236,42 @@ def login_endpoint():
     result = login_user(email, password)
     status = 200 if result.get('success') else 401
     return jsonify(result), status
+
+
+@app.route('/products', methods=['GET'])
+def products_endpoint():
+    products = get_products()
+    return jsonify({'success': True, 'products': products}), 200
+
+
+@app.route('/products', methods=['POST'])
+def add_product_endpoint():
+    data = request.get_json(force=True, silent=True)
+    if not data:
+        return jsonify({'success': False, 'error': 'A kérés nem tartalmaz JSON payloadot.'}), 400
+
+    name = data.get('prod_name', '').strip()
+    price = data.get('prod_price', None)
+    image = data.get('prod_image', '').strip()
+
+    if not name or price is None:
+        return jsonify({'success': False, 'error': 'prod_name és prod_price kötelező.'}), 400
+
+    try:
+        price_val = float(price)
+    except (TypeError, ValueError):
+        return jsonify({'success': False, 'error': 'prod_price érvénytelen.'}), 400
+
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        ensure_products_table_exists()
+        cursor.execute(
+            "INSERT INTO Products (prod_name, prod_price, prod_image) VALUES (?, ?, ?)",
+            (name, price_val, image if image else None)
+        )
+        conn.commit()
+
+    return jsonify({'success': True}), 201
 
 
 if __name__ == '__main__':

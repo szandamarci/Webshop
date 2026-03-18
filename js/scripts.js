@@ -22,7 +22,7 @@ async function loadPage(page) {
     if (!response.ok) throw new Error('Page not found');
     const html = await response.text();
     content.innerHTML = html;
-    await loadProducts();
+    renderProducts();
   }
 
   if (page === "cart") {
@@ -102,73 +102,101 @@ function logout() {
   loadPage('index');
 }
 
+async function renderProducts() {
+  const container = document.getElementById('dynamic-products-grid');
+  const staticRow = document.getElementById('static-products-row');
+
+  if (!container) return;
+  if (staticRow) staticRow.style.display = 'none';
+
+  container.innerHTML = '<div class="col-12 text-center py-5">Termékek betöltése...</div>';
+
+  try {
+    const res = await fetch('http://localhost:5000/products');
+    if (!res.ok) {
+      container.innerHTML = '<div class="col-12 text-center text-danger py-5">Nem sikerült betölteni a termékeket.</div>';
+      return;
+    }
+
+    const result = await res.json();
+    const products = (result && result.products) || [];
+
+    if (!products.length) {
+      container.innerHTML = '<div class="col-12 text-center py-5">Nincsenek elérhető termékek.</div>';
+      return;
+    }
+
+    container.innerHTML = products.map(prod => {
+      const imageUrl = prod.prod_image || 'https://dummyimage.com/450x300/dee2e6/6c757d.jpg';
+      const price = prod.prod_price ? parseFloat(prod.prod_price) : 0;
+      const priceDisplay = price ? price.toFixed(2) + ' Ft' : 'Nincs ár';
+      return `
+        <div class="col mb-5">
+          <div class="card h-100">
+            <img class="card-img-top" src="${imageUrl}" alt="${prod.prod_name}">
+            <div class="card-body p-4">
+              <div class="text-center">
+                <h5 class="fw-bolder">${prod.prod_name}</h5>
+                <p class="mb-0">${priceDisplay}</p>
+              </div>
+            </div>
+            <div class="card-footer p-4 pt-0 border-top-0 bg-transparent">
+              <div class="text-center"><a class="btn btn-outline-dark mt-auto add-to-cart" href="#" data-item="${encodeURIComponent(prod.prod_name)}" data-price="${price}">Add to cart</a></div>
+            </div>
+          </div>
+        </div>`;
+    }).join('');
+
+    initCartEvents();
+  } catch (error) {
+    container.innerHTML = `<div class="col-12 text-center text-danger py-5">Hiba történt: ${error.message}</div>`;
+  }
+}
+
 function searchProducts() {
   const query = document.getElementById('search')?.value.trim().toLowerCase() || '';
-  const productCols = document.querySelectorAll('#products-row .col');
+  const productCols = document.querySelectorAll('#dynamic-products-grid .col');
   if (!productCols) return;
 
   productCols.forEach(col => {
     const title = col.querySelector('.card-body h5')?.textContent?.toLowerCase() || '';
-    const desc = col.querySelector('.card-body p')?.textContent?.toLowerCase() || '';
+    const price = col.querySelector('.card-body p')?.textContent?.toLowerCase() || '';
     const alt = col.querySelector('.card-img-top')?.alt?.toLowerCase() || '';
-    const content = `${title} ${desc} ${alt}`;
+    const content = `${title} ${price} ${alt}`;
 
     if (!query || content.includes(query)) {
-      col.classList.remove('d-none');
+      col.style.display = '';
     } else {
-      col.classList.add('d-none');
+      col.style.display = 'none';
     }
   });
 }
 
-async function loadProducts() {
-  const grid = document.getElementById('products-row');
-  if (!grid) return;
 
+const CART_KEY = 'webshopCart';
+
+function loadCart() {
   try {
-    const res = await fetch('http://localhost:5000/products');
-    if (!res.ok) throw new Error('Nem sikerült termékeket lekérni.');
-    const products = await res.json();
-
-    if (!Array.isArray(products)) {
-      grid.innerHTML = '<p class="text-danger">Nincs termék adat.</p>';
-      return;
-    }
-
-    grid.innerHTML = products.map(p => {
-      const price = Number(p.price || 0).toFixed(2);
-      const image = p.image || 'assets/Products/placeholder.png';
-      return `
-        <div class="col mb-5">
-          <div class="card h-100">
-            <img class="card-img-top" src="${image}" alt="${p.name || ''}" />
-            <div class="card-body p-4">
-              <div class="text-center">
-                <h5 class="fw-bolder">${p.name || 'Név nélkül'}</h5>
-                <p>${price} Ft</p>
-              </div>
-            </div>
-            <div class="card-footer p-4 pt-0 border-top-0 bg-transparent">
-              <div class="text-center"><a class="btn btn-outline-dark mt-auto add-to-cart" href="#">Add to cart</a></div>
-            </div>
-          </div>
-        </div>
-      `;
-    }).join('');
-
-    initCartEvents();
-    searchProducts();
-  } catch (error) {
-    grid.innerHTML = `<p class="text-danger">Hiba: ${error.message}</p>`;
+    const raw = localStorage.getItem(CART_KEY);
+    if (!raw) return [];
+    return JSON.parse(raw);    
+  } catch (e) {
+    console.error('Cart parse error', e);
+    return [];
   }
 }
 
-let cartCount = 0;
-let cartItems = [];
+function saveCart() {
+  localStorage.setItem(CART_KEY, JSON.stringify(cartItems));
+}
+
+let cartItems = loadCart();
+let cartCount = cartItems.reduce((sum, item) => sum + (item.quantity || 1), 0);
 
 function updateCartBadge() {
   const badge = document.getElementById("cart-count");
   if (!badge) return;
+  cartCount = cartItems.reduce((sum, item) => sum + (item.quantity || 1), 0);
   badge.textContent = String(cartCount);
 }
 
@@ -178,20 +206,44 @@ function renderCartItems() {
 
   if (cartItems.length === 0) {
     list.innerHTML = '<li>Nincs termék a kosárban.</li>';
+    const tot = document.getElementById('total-price');
+    if (tot) tot.textContent = '0 Ft';
     return;
   }
 
+  let totalPrice = 0;
   list.innerHTML = cartItems
-    .map(item => `<li>${item}</li>`)
+    .map(item => {
+      const qty = item.quantity || 1;
+      const price = Number(item.price || 0);
+      const itemTotal = qty * price;
+      totalPrice += itemTotal;
+      return `<li>${item.name} - ${qty} x ${price.toFixed(2)} Ft = ${itemTotal.toFixed(2)} Ft</li>`;
+    })
     .join("");
+
+  const total = document.getElementById('total-price');
+  if (total) {
+    total.textContent = `${totalPrice.toFixed(2)} Ft`;
+  }
+
+  saveCart();
+  updateCartBadge();
 }
 
-function addToCart(amount = 1, item = null) {
-  cartCount += amount;
-  if (item) {
-    cartItems.push(item);
-    console.log("Kosár tartalma:", cartItems);
+function addToCart(amount = 1, itemName = null, itemPrice = 0) {
+  if (!itemName) return;
+  const normalizedName = itemName.trim();
+  const price = Number(itemPrice) || 0;
+
+  const existing = cartItems.find(i => i.name === normalizedName && i.price === price);
+  if (existing) {
+    existing.quantity = (existing.quantity || 1) + amount;
+  } else {
+    cartItems.push({ name: normalizedName, price, quantity: amount });
   }
+
+  saveCart();
   updateCartBadge();
   renderCartItems();
 }
@@ -207,17 +259,26 @@ function handleAddToCart(event) {
   event.preventDefault();
 
   const btn = event.currentTarget;
-  let itemName = btn.dataset.item || null;
+  let itemName = btn.dataset.item ? decodeURIComponent(btn.dataset.item) : null;
+  let itemPrice = Number(btn.dataset.price || 0);
 
   if (!itemName) {
     const card = btn.closest(".card");
     if (card) {
       const title = card.querySelector(".card-body h5");
       if (title) itemName = title.textContent.trim();
+
+      if (!itemPrice) {
+        const priceEl = card.querySelector('.card-body p');
+        if (priceEl) {
+          const priceText = priceEl.textContent.replace(/[\$Ft\s]/g, '').replace(',', '.');
+          itemPrice = Number(priceText) || 0;
+        }
+      }
     }
   }
 
-  addToCart(1, itemName);
+  addToCart(1, itemName, itemPrice);
 }
 
 document.addEventListener("DOMContentLoaded", () => {
@@ -225,6 +286,7 @@ document.addEventListener("DOMContentLoaded", () => {
   updateCartBadge();
   renderCartItems();
   updateAuthNav();
+  renderProducts();
 
   const searchInput = document.getElementById('search');
   if (searchInput) {
