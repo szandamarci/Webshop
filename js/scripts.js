@@ -60,6 +60,7 @@ async function loadPage(page) {
   updateCartBadge();  
   renderCartItems();
   updateAuthNav();
+  updateProductCartUI();
 }
 
 function getCurrentUser() {
@@ -151,12 +152,14 @@ async function renderProducts() {
   } catch (error) {
     container.innerHTML = `<div class="col-12 text-center text-danger py-5">Hiba történt: ${error.message}</div>`;
   }
+
+  updateProductCartUI();
 }
 
 function searchProducts() {
   const query = document.getElementById('search')?.value.trim().toLowerCase() || '';
-  const productCols = document.querySelectorAll('#dynamic-products-grid .col');
-  if (!productCols) return;
+  const productCols = document.querySelectorAll('#dynamic-products-grid .col, #static-products-row .col, #content .col');
+  if (!productCols.length) return;
 
   productCols.forEach(col => {
     const title = col.querySelector('.card-body h5')?.textContent?.toLowerCase() || '';
@@ -201,34 +204,119 @@ function updateCartBadge() {
 }
 
 function renderCartItems() {
-  const list = document.getElementById("cart-items-list");
-  if (!list) return;
+  const container = document.getElementById('cart-items-container');
+  const template = document.getElementById('cart-item-template');
+  if (!container || !template) return;
+
+  container.innerHTML = '';
 
   if (cartItems.length === 0) {
-    list.innerHTML = '<li>Nincs termék a kosárban.</li>';
+    container.innerHTML = '<div>Nincs termék a kosárban.</div>';
     const tot = document.getElementById('total-price');
     if (tot) tot.textContent = '0 Ft';
     return;
   }
 
   let totalPrice = 0;
-  list.innerHTML = cartItems
-    .map(item => {
-      const qty = item.quantity || 1;
-      const price = Number(item.price || 0);
-      const itemTotal = qty * price;
-      totalPrice += itemTotal;
-      return `<li>${item.name} - ${qty} x ${price.toFixed(2)} Ft = ${itemTotal.toFixed(2)} Ft</li>`;
-    })
-    .join("");
+
+  cartItems.forEach(item => {
+    const qty = item.quantity || 1;
+    const price = Number(item.price || 0);
+    const itemTotal = qty * price;
+    totalPrice += itemTotal;
+
+    const clone = template.content.cloneNode(true);
+    const itemRow = clone.querySelector('.cart-item-row');
+    const qtySpan = clone.querySelector('.cart-item-qty');
+    const details = clone.querySelector('.cart-item-details');
+    const decBtn = clone.querySelector('.decrement-cart-item');
+    const incBtn = clone.querySelector('.increment-cart-item');
+
+    if (qtySpan) qtySpan.textContent = String(qty);
+    if (details) details.innerHTML = `<strong>${item.name}</strong> - ${qty} x ${price.toFixed(2)} Ft = ${itemTotal.toFixed(2)} Ft`;
+
+    if (decBtn) {
+      decBtn.addEventListener('click', (event) => {
+        event.preventDefault();
+        addToCart(-1, item.name, price);
+      });
+    }
+    if (incBtn) {
+      incBtn.addEventListener('click', (event) => {
+        event.preventDefault();
+        addToCart(1, item.name, price);
+      });
+    }
+
+    container.appendChild(clone);
+  });
 
   const total = document.getElementById('total-price');
-  if (total) {
-    total.textContent = `${totalPrice.toFixed(2)} Ft`;
-  }
+  if (total) total.textContent = `${totalPrice.toFixed(2)} Ft`;
 
   saveCart();
   updateCartBadge();
+  updateProductCartUI();
+}
+
+function getCartItem(name, price) {
+  return cartItems.find(i => i.name === name && Number(i.price) === Number(price));
+}
+
+function getCartQuantity(name, price) {
+  const item = getCartItem(name, price);
+  return item ? (item.quantity || 0) : 0;
+}
+
+function removeFromCart(itemName, itemPrice) {
+  cartItems = cartItems.filter(i => !(i.name === itemName && Number(i.price) === Number(itemPrice)));
+  saveCart();
+  updateCartBadge();
+  renderCartItems();
+  updateProductCartUI();
+}
+
+function updateProductCartUI() {
+  document.querySelectorAll('.card').forEach(card => {
+    const title = card.querySelector('.card-body h5');
+    if (!title) return;
+
+    const itemName = title.textContent.trim();
+    let itemPrice = 0;
+
+    const priceEl = card.querySelector('.card-body p');
+    if (priceEl) {
+      const numberText = priceEl.textContent.replace(/[\$Ft\s,]/g, '').replace(',', '.');
+      itemPrice = Number(numberText) || 0;
+    }
+
+    const quantity = getCartQuantity(itemName, itemPrice);
+    const footer = card.querySelector('.card-footer');
+    if (!footer) return;
+
+    if (quantity > 0) {
+      footer.innerHTML = `
+        <div class="d-flex justify-content-center align-items-center">
+          <button class="btn btn-sm btn-outline-secondary me-2 decrement-btn">-</button>
+          <span class="fw-bold">${quantity}</span>
+          <button class="btn btn-sm btn-outline-secondary ms-2 increment-btn">+</button>
+        </div>`;
+      const decBtn = footer.querySelector('.decrement-btn');
+      const incBtn = footer.querySelector('.increment-btn');
+      decBtn.addEventListener('click', () => {
+        addToCart(-1, itemName, itemPrice);
+      });
+      incBtn.addEventListener('click', () => {
+        addToCart(1, itemName, itemPrice);
+      });
+    } else {
+      footer.innerHTML = `<div class="text-center"><a class="btn btn-outline-dark mt-auto add-to-cart" href="#" data-item="${encodeURIComponent(itemName)}" data-price="${itemPrice}">Add to cart</a></div>`;
+      const addBtn = footer.querySelector('.add-to-cart');
+      if (addBtn) {
+        addBtn.addEventListener('click', handleAddToCart);
+      }
+    }
+  });
 }
 
 function addToCart(amount = 1, itemName = null, itemPrice = 0) {
@@ -236,16 +324,20 @@ function addToCart(amount = 1, itemName = null, itemPrice = 0) {
   const normalizedName = itemName.trim();
   const price = Number(itemPrice) || 0;
 
-  const existing = cartItems.find(i => i.name === normalizedName && i.price === price);
+  const existing = cartItems.find(i => i.name === normalizedName && Number(i.price) === price);
   if (existing) {
     existing.quantity = (existing.quantity || 1) + amount;
-  } else {
+    if (existing.quantity <= 0) {
+      cartItems = cartItems.filter(i => !(i.name === normalizedName && Number(i.price) === price));
+    }
+  } else if (amount > 0) {
     cartItems.push({ name: normalizedName, price, quantity: amount });
   }
 
   saveCart();
   updateCartBadge();
   renderCartItems();
+  updateProductCartUI();
 }
 
 function initCartEvents() {
@@ -287,6 +379,7 @@ document.addEventListener("DOMContentLoaded", () => {
   renderCartItems();
   updateAuthNav();
   renderProducts();
+  updateProductCartUI();
 
   const searchInput = document.getElementById('search');
   if (searchInput) {

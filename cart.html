@@ -15,7 +15,20 @@
     </head>
     <body>
         <h1>Termékek a kosárban:</h1>
-            <ul id="cart-items-list"></ul>
+        <div id="cart-items-container"></div>
+
+        <template id="cart-item-template">
+            <div class="d-flex align-items-center mb-1 cart-item-row">
+                <div class="cart-item-details me-3"></div>
+
+                <div class="btn-group ms-auto me-3" role="group">
+                    <button class="btn btn-sm btn-outline-secondary decrement-cart-item" type="button">-</button>
+                    <span class="px-2 cart-item-qty">0</span>
+                    <button class="btn btn-sm btn-outline-secondary increment-cart-item" type="button">+</button>
+                </div>
+            </div>
+        </template>
+
         <h1>Összesen:</h1>
             <p id="total-price">0 Ft</p>
 
