@@ -42,8 +42,6 @@
                         <li class="nav-item"><a class="nav-link active" href="#!" onclick="loadPage('about')">Rólunk</a></li>
                         <li class="nav-item"><a class="nav-link active" href="#!" onclick="loadPage('contact')">Kapcsolat</a></li>
                         <!-- <li class="nav-item"><a class="nav-link active" aria-current="page" href="#!">Termékek</a></li> -->
-                        <li class="nav-item"><a class="nav-link active" href="#!" onclick="loadPage('about')">Rólunk</a></li>
-                        <li class="nav-item"><a class="nav-link active" href="#!" onclick="loadPage('contact')">Kapcsolat</a></li>
                         <!-- <li class="nav-item dropdown">
                             <a class="nav-link dropdown-toggle" id="navbarDropdown" href="#" role="button" data-bs-toggle="dropdown" aria-expanded="false">Shop</a>
                             <ul class="dropdown-menu" aria-labelledby="navbarDropdown">
@@ -76,6 +74,10 @@
                             <a class="nav-link active" href="#" onclick="loadPage('register')">Regisztráció</a>
                         </li>
 
+                        <li class="nav-item me-2" id="nav-admin" style="display: none;">
+                            <a class="nav-link active" href="#" onclick="loadPage('admin')">Admin</a>
+                        </li>
+
                         <li class="nav-item ms-2" id="nav-user" style="display: none;">
                             <span class="nav-link active" id="user-display"></span>
                             <a class="nav-link text-danger" href="#" onclick="logout()">Kilépés</a>
@@ -94,9 +96,9 @@
             <div class="offcanvas-body">
                 <h6>Kategóriák</h6>
                 <ul class="nav flex-column mb-3">
-                    <li class="nav-item"><a class="nav-link" href="#!" onclick="loadPage('index')">Összes</a></li>
-                    <li class="nav-item"><a class="nav-link" href="#!">Fűszerek</a></li>
-                    <li class="nav-item"><a class="nav-link" href="#!">Grill felszerelések</a></li>
+                    <li class="nav-item"><a class="nav-link" href="#!" onclick="filterProductsByCategory('all')">Összes</a></li>
+                    <li class="nav-item"><a class="nav-link" href="#!" onclick="filterProductsByCategory('fűszer')">Fűszerek</a></li>
+                    <li class="nav-item"><a class="nav-link" href="#!" onclick="filterProductsByCategory('grill')">Grill felszerelések</a></li>
                     <li class="nav-item"><a class="nav-link" href="#!">Akciók</a></li>
                 </ul>
                 <hr class="bg-light">

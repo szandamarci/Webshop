@@ -1,0 +1,78 @@
+<section class="py-5 bg-light">
+  <div class="container px-4 px-lg-5">
+    <div class="d-flex justify-content-between align-items-center mb-4">
+      <h2 class="mb-0">Admin Termékkezelő</h2>
+      <small class="text-muted">Hozzáadás, ár módosítás, törlés</small>
+    </div>
+
+    <div class="card mb-4">
+      <div class="card-body">
+        <h5 class="card-title">Új termék hozzáadása</h5>
+        <form id="admin-add-product-form" class="row g-3">
+          <div class="col-md-4">
+            <label for="admin-prod-name" class="form-label">Termék neve</label>
+            <input type="text" class="form-control" id="admin-prod-name" required>
+          </div>
+          <div class="col-md-2">
+            <label for="admin-prod-price" class="form-label">Ár (Ft)</label>
+            <input type="number" step="0.01" min="0" class="form-control" id="admin-prod-price" required>
+          </div>
+          <div class="col-md-3">
+            <label for="admin-prod-category" class="form-label">Kategória</label>
+            <input type="text" class="form-control" id="admin-prod-category" placeholder="pl. fűszer vagy grill">
+          </div>
+          <div class="col-md-3">
+            <label for="admin-prod-image" class="form-label">Kép URL / fájlnév</label>
+            <input type="text" class="form-control" id="admin-prod-image" placeholder="pl. paprika.jpg">
+          </div>
+          <div class="col-12">
+            <button type="submit" class="btn btn-dark">Termék mentése</button>
+          </div>
+          <div class="col-12">
+            <div id="admin-add-message" class="small"></div>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-body">
+        <div class="d-flex justify-content-between align-items-center mb-3">
+          <h5 class="card-title mb-0">Meglévő termékek</h5>
+          <button type="button" class="btn btn-outline-secondary btn-sm" id="admin-refresh-products">Frissítés</button>
+        </div>
+
+        <div class="mb-3">
+          <input
+            type="text"
+            class="form-control"
+            id="admin-product-search"
+            placeholder="Termék keresése név vagy kategória alapján..."
+          >
+        </div>
+
+        <div class="table-responsive">
+          <table class="table table-striped align-middle">
+            <thead>
+              <tr>
+                <th>ID</th>
+                <th>Név</th>
+                <th>Kategória</th>
+                <th>Kép</th>
+                <th>Ár</th>
+                <th>Műveletek</th>
+              </tr>
+            </thead>
+            <tbody id="admin-products-table-body">
+              <tr>
+                <td colspan="6" class="text-center py-4">Termékek betöltése...</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div id="admin-table-message" class="small"></div>
+      </div>
+    </div>
+  </div>
+</section>

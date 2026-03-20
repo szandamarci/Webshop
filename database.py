@@ -6,6 +6,14 @@ from flask_cors import CORS
 app = Flask(__name__)
 CORS(app)
 
+ADMIN_EMAILS = {
+    'admin@webshop.hu',
+    'owner@webshop.hu',
+    'marciszanda@gmail.com',
+    'csaba.zsemlye@gmail.com',
+    'zsadel2@gmail.com'
+}
+
 DB_CONFIG = {
     'driver': '{SQL Server}',
     'server': 'localhost\\SQLEXPRESS',
@@ -80,7 +88,8 @@ def ensure_products_table_exists():
                 prod_id INT IDENTITY(1,1) PRIMARY KEY,
                 prod_name NVARCHAR(255) NOT NULL,
                 prod_price FLOAT NOT NULL,
-                prod_image NVARCHAR(512) NULL
+                prod_image NVARCHAR(512) NULL,
+                prod_category NVARCHAR(100) NULL
             );
             """
         )
@@ -91,44 +100,93 @@ def ensure_products_table_exists():
         if 'prod_image' not in existing_columns:
             cursor.execute("ALTER TABLE Products ADD prod_image NVARCHAR(512) NULL")
 
+        if 'prod_category' not in existing_columns:
+            cursor.execute("ALTER TABLE Products ADD prod_category NVARCHAR(100) NULL")
+
         conn.commit()
 
 
-def get_products() -> list:
+def is_admin_email(email: str) -> bool:
+    return (email or '').strip().lower() in ADMIN_EMAILS
+
+
+def get_products_columns(cursor):
+    cursor.execute("SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME='Products'")
+    existing_columns = {row[0].lower() for row in cursor.fetchall()}
+
+    return {
+        'existing': existing_columns,
+        'id': 'prod_id' if 'prod_id' in existing_columns else ('id' if 'id' in existing_columns else None),
+        'name': 'prod_name' if 'prod_name' in existing_columns else ('name' if 'name' in existing_columns else None),
+        'price': 'prod_price' if 'prod_price' in existing_columns else ('price' if 'price' in existing_columns else None),
+        'image': 'prod_image' if 'prod_image' in existing_columns else ('image' if 'image' in existing_columns else None),
+        'category': 'prod_category' if 'prod_category' in existing_columns else ('category' if 'category' in existing_columns else None)
+    }
+
+
+def get_products(category: str = None) -> list:
     ensure_products_table_exists()
 
     with get_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME='Products'")
-        existing_columns = {row[0].lower() for row in cursor.fetchall()}
-
-        name_col = 'prod_name' if 'prod_name' in existing_columns else ('name' if 'name' in existing_columns else None)
-        price_col = 'prod_price' if 'prod_price' in existing_columns else ('price' if 'price' in existing_columns else None)
-        id_col = 'prod_id' if 'prod_id' in existing_columns else ('id' if 'id' in existing_columns else None)
-        image_col = 'prod_image' if 'prod_image' in existing_columns else ('image' if 'image' in existing_columns else None)
+        cols = get_products_columns(cursor)
+        name_col = cols['name']
+        price_col = cols['price']
+        id_col = cols['id']
+        image_col = cols['image']
+        category_col = cols['category']
 
         if not name_col or not price_col:
             raise ValueError('Products table must contain prod_name/name and prod_price/price columns.')
 
-        selected_columns = [name_col, price_col]
+        selected_columns = []
+        if id_col:
+            selected_columns.append(id_col)
+        selected_columns.extend([name_col, price_col])
         if image_col:
             selected_columns.append(image_col)
+        if category_col:
+            selected_columns.append(category_col)
 
         order_by = id_col if id_col else name_col
 
-        query = f"SELECT {', '.join(selected_columns)} FROM Products ORDER BY {order_by}"
-        cursor.execute(query)
+        query = f"SELECT {', '.join(selected_columns)} FROM Products"
+        params = []
+
+        if category:
+            if category_col:
+                query += f" WHERE LOWER({category_col}) = LOWER(?)"
+                params.append(category)
+
+        query += f" ORDER BY {order_by}"
+
+        cursor.execute(query, params)
         rows = cursor.fetchall()
 
     products = []
     for r in rows:
+        idx = 0
+        prod_id = None
+        if id_col:
+            prod_id = r[idx]
+            idx += 1
+
         product = {
-            'prod_name': r[0],
-            'prod_price': float(r[1]),
+            'prod_id': int(prod_id) if prod_id is not None else None,
+            'prod_name': r[idx],
+            'prod_price': float(r[idx + 1]),
             'prod_image': ''
         }
+        idx += 2
+
         if image_col:
-            product['prod_image'] = r[2] if len(r) > 2 and r[2] is not None else ''
+            product['prod_image'] = r[idx] if r[idx] is not None else ''
+            idx += 1
+
+        if category_col:
+            product['prod_category'] = r[idx] if r[idx] is not None else ''
+        else:
+            product['prod_category'] = ''
 
         # if image path is relative filename, prefix assets/products/
         if product['prod_image'] and not product['prod_image'].lower().startswith('http') and not product['prod_image'].startswith('/'):
@@ -198,7 +256,8 @@ def login_user(email: str, password: str) -> dict:
         'user': {
             'email': email,
             'firstName': first_name or '',
-            'lastName': last_name or ''
+            'lastName': last_name or '',
+            'isAdmin': is_admin_email(email)
         }
     }
 
@@ -240,7 +299,8 @@ def login_endpoint():
 
 @app.route('/products', methods=['GET'])
 def products_endpoint():
-    products = get_products()
+    category = request.args.get('category', '').strip()
+    products = get_products(category if category else None)
     return jsonify({'success': True, 'products': products}), 200
 
 
@@ -250,9 +310,14 @@ def add_product_endpoint():
     if not data:
         return jsonify({'success': False, 'error': 'A kérés nem tartalmaz JSON payloadot.'}), 400
 
+    requester_email = data.get('requester_email', '').strip().lower()
+    if not is_admin_email(requester_email):
+        return jsonify({'success': False, 'error': 'Nincs admin jogosultság ehhez a művelethez.'}), 403
+
     name = data.get('prod_name', '').strip()
     price = data.get('prod_price', None)
     image = data.get('prod_image', '').strip()
+    category = data.get('prod_category', '').strip()
 
     if not name or price is None:
         return jsonify({'success': False, 'error': 'prod_name és prod_price kötelező.'}), 400
@@ -265,13 +330,148 @@ def add_product_endpoint():
     with get_connection() as conn:
         cursor = conn.cursor()
         ensure_products_table_exists()
+        cols = get_products_columns(cursor)
+
+        name_col = cols['name']
+        price_col = cols['price']
+        image_col = cols['image']
+        category_col = cols['category']
+
+        if not name_col or not price_col:
+            return jsonify({'success': False, 'error': 'A Products tábla hiányos: név/ár oszlop nem található.'}), 500
+
+        insert_columns = [name_col, price_col]
+        insert_values = [name, price_val]
+
+        if image_col:
+            insert_columns.append(image_col)
+            insert_values.append(image if image else None)
+
+        if category_col:
+            insert_columns.append(category_col)
+            insert_values.append(category if category else None)
+
+        placeholders = ', '.join(['?'] * len(insert_columns))
         cursor.execute(
-            "INSERT INTO Products (prod_name, prod_price, prod_image) VALUES (?, ?, ?)",
-            (name, price_val, image if image else None)
+            f"INSERT INTO Products ({', '.join(insert_columns)}) VALUES ({placeholders})",
+            insert_values
         )
         conn.commit()
 
     return jsonify({'success': True}), 201
+
+
+@app.route('/products/<int:prod_id>', methods=['PUT'])
+def update_product_endpoint(prod_id: int):
+    data = request.get_json(force=True, silent=True)
+    if not data:
+        return jsonify({'success': False, 'error': 'A kérés nem tartalmaz JSON payloadot.'}), 400
+
+    requester_email = data.get('requester_email', '').strip().lower()
+    if not is_admin_email(requester_email):
+        return jsonify({'success': False, 'error': 'Nincs admin jogosultság ehhez a művelethez.'}), 403
+
+    prod_name = data.get('prod_name', None)
+    prod_image = data.get('prod_image', None)
+    prod_category = data.get('prod_category', None)
+    price = data.get('prod_price', None)
+
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        ensure_products_table_exists()
+        cols = get_products_columns(cursor)
+
+        id_col = cols['id']
+        name_col = cols['name']
+        price_col = cols['price']
+        image_col = cols['image']
+        category_col = cols['category']
+
+        if not id_col:
+            return jsonify({'success': False, 'error': 'A Products tábla hiányos: azonosító oszlop nem található.'}), 500
+
+        updates = []
+        params = []
+
+        if prod_name is not None:
+            if not name_col:
+                return jsonify({'success': False, 'error': 'A Products tábla hiányos: név oszlop nem található.'}), 500
+
+            name_val = str(prod_name).strip()
+            if not name_val:
+                return jsonify({'success': False, 'error': 'prod_name nem lehet üres.'}), 400
+
+            updates.append(f"{name_col} = ?")
+            params.append(name_val)
+
+        if price is not None:
+            if not price_col:
+                return jsonify({'success': False, 'error': 'A Products tábla hiányos: ár oszlop nem található.'}), 500
+
+            try:
+                price_val = float(price)
+            except (TypeError, ValueError):
+                return jsonify({'success': False, 'error': 'prod_price érvénytelen.'}), 400
+
+            updates.append(f"{price_col} = ?")
+            params.append(price_val)
+
+        if prod_image is not None:
+            if not image_col:
+                return jsonify({'success': False, 'error': 'A Products tábla hiányos: kép oszlop nem található.'}), 500
+
+            image_val = str(prod_image).strip() if prod_image is not None else ''
+            updates.append(f"{image_col} = ?")
+            params.append(image_val if image_val else None)
+
+        if prod_category is not None:
+            if not category_col:
+                return jsonify({'success': False, 'error': 'A Products tábla hiányos: kategória oszlop nem található.'}), 500
+
+            category_val = str(prod_category).strip() if prod_category is not None else ''
+            updates.append(f"{category_col} = ?")
+            params.append(category_val if category_val else None)
+
+        if not updates:
+            return jsonify({'success': False, 'error': 'Nincs frissítendő mező.'}), 400
+
+        params.append(prod_id)
+        cursor.execute(
+            f"UPDATE Products SET {', '.join(updates)} WHERE {id_col} = ?",
+            params
+        )
+
+        if cursor.rowcount == 0:
+            return jsonify({'success': False, 'error': 'A termék nem található.'}), 404
+
+        conn.commit()
+
+    return jsonify({'success': True}), 200
+
+
+@app.route('/products/<int:prod_id>', methods=['DELETE'])
+def delete_product_endpoint(prod_id: int):
+    requester_email = request.args.get('requester_email', '').strip().lower()
+    if not is_admin_email(requester_email):
+        return jsonify({'success': False, 'error': 'Nincs admin jogosultság ehhez a művelethez.'}), 403
+
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        ensure_products_table_exists()
+        cols = get_products_columns(cursor)
+
+        id_col = cols['id']
+        if not id_col:
+            return jsonify({'success': False, 'error': 'A Products tábla hiányos: azonosító oszlop nem található.'}), 500
+
+        cursor.execute(f"DELETE FROM Products WHERE {id_col} = ?", (prod_id,))
+
+        if cursor.rowcount == 0:
+            return jsonify({'success': False, 'error': 'A termék nem található.'}), 404
+
+        conn.commit()
+
+    return jsonify({'success': True}), 200
 
 
 if __name__ == '__main__':
