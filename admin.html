@@ -25,6 +25,17 @@
             <label for="admin-prod-image" class="form-label">Kép URL / fájlnév</label>
             <input type="text" class="form-control" id="admin-prod-image" placeholder="pl. paprika.jpg">
           </div>
+          <div class="col-md-12">
+            <label class="form-label d-block mb-1">Akciós?</label>
+            <div class="form-check form-check-inline">
+              <input class="form-check-input" type="radio" name="admin-prod-sale" id="admin-prod-sale-no" value="0" checked>
+              <label class="form-check-label" for="admin-prod-sale-no">Nem</label>
+            </div>
+            <div class="form-check form-check-inline">
+              <input class="form-check-input" type="radio" name="admin-prod-sale" id="admin-prod-sale-yes" value="1">
+              <label class="form-check-label" for="admin-prod-sale-yes">Igen</label>
+            </div>
+          </div>
           <div class="col-12">
             <button type="submit" class="btn btn-dark">Termék mentése</button>
           </div>
@@ -60,12 +71,13 @@
                 <th>Kategória</th>
                 <th>Kép</th>
                 <th>Ár</th>
+                <th>Akció</th>
                 <th>Műveletek</th>
               </tr>
             </thead>
             <tbody id="admin-products-table-body">
               <tr>
-                <td colspan="6" class="text-center py-4">Termékek betöltése...</td>
+                <td colspan="7" class="text-center py-4">Termékek betöltése...</td>
               </tr>
             </tbody>
           </table>

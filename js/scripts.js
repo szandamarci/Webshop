@@ -78,9 +78,13 @@ async function loadPage(page) {
   updateAuthNav();
   updateProductCartUI();
   initMainSearchEvents();
+  initSidebarPriceFilter();
 }
 
 let selectedCategory = null;
+const SIDEBAR_PRICE_MAX = 10000000;
+let selectedPriceMax = SIDEBAR_PRICE_MAX;
+let selectedSaleOnly = false;
 
 function normalizeCategory(category) {
   if (!category || category === 'all') return null;
@@ -89,6 +93,20 @@ function normalizeCategory(category) {
 
 async function filterProductsByCategory(category) {
   selectedCategory = normalizeCategory(category);
+  selectedSaleOnly = false;
+
+  const hasProductsGrid = !!document.getElementById('dynamic-products-grid');
+  if (!hasProductsGrid) {
+    await loadPage('index');
+    return;
+  }
+
+  renderProducts(selectedCategory);
+}
+
+async function filterProductsOnSale() {
+  selectedCategory = null;
+  selectedSaleOnly = true;
 
   const hasProductsGrid = !!document.getElementById('dynamic-products-grid');
   if (!hasProductsGrid) {
@@ -165,19 +183,24 @@ async function renderProducts(category = null) {
 
     const result = await res.json();
     const products = (result && result.products) || [];
+    const filteredProducts = selectedSaleOnly
+      ? products.filter((prod) => Boolean(prod.prod_sale))
+      : products;
 
-    if (!products.length) {
+    if (!filteredProducts.length) {
       container.innerHTML = '<div class="col-12 text-center py-5">Nincsenek elérhető termékek.</div>';
       return;
     }
 
-    container.innerHTML = products.map(prod => {
+    container.innerHTML = filteredProducts.map(prod => {
       const imageUrl = prod.prod_image || 'https://dummyimage.com/450x300/dee2e6/6c757d.jpg';
       const price = prod.prod_price ? parseFloat(prod.prod_price) : 0;
+      const isSale = Boolean(prod.prod_sale);
       const priceDisplay = price ? price.toFixed(2) + ' Ft' : 'Nincs ár';
       return `
         <div class="col mb-5">
           <div class="card h-100">
+            ${isSale ? '<div class="badge bg-dark text-white position-absolute" style="top: 0.5rem; right: 0.5rem">Sale</div>' : ''}
             <img class="card-img-top" src="${imageUrl}" alt="${prod.prod_name}">
             <div class="card-body p-4">
               <div class="text-center">
@@ -208,16 +231,58 @@ function searchProducts() {
 
   productCols.forEach(col => {
     const title = col.querySelector('.card-body h5')?.textContent?.toLowerCase() || '';
-    const price = col.querySelector('.card-body p')?.textContent?.toLowerCase() || '';
+    const priceText = col.querySelector('.card-body p')?.textContent?.toLowerCase() || '';
     const alt = col.querySelector('.card-img-top')?.alt?.toLowerCase() || '';
-    const content = `${title} ${price} ${alt}`;
+    const content = `${title} ${priceText} ${alt}`;
+    const productPrice = getProductPriceFromCard(col);
+    const matchesPrice = productPrice <= selectedPriceMax;
 
-    if (!query || content.includes(query)) {
+    if ((!query || content.includes(query)) && matchesPrice) {
       col.style.display = '';
     } else {
       col.style.display = 'none';
     }
   });
+}
+
+function getProductPriceFromCard(cardCol) {
+  const priceText = cardCol?.querySelector('.card-body p')?.textContent || '';
+  let normalizedText = priceText.replace(/[^\d.,-]/g, '');
+  if (!normalizedText) return 0;
+
+  if (normalizedText.includes(',') && normalizedText.includes('.')) {
+    normalizedText = normalizedText.replace(/\./g, '').replace(',', '.');
+  } else if (normalizedText.includes(',')) {
+    normalizedText = normalizedText.replace(',', '.');
+  }
+
+  const parsed = Number(normalizedText);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function updateSidebarPriceLabel() {
+  const label = document.getElementById('sidebar-price-value');
+  if (!label) return;
+  label.textContent = `0 - ${selectedPriceMax.toLocaleString('hu-HU')} Ft`;
+}
+
+function initSidebarPriceFilter() {
+  const range = document.getElementById('sidebar-price-range');
+  if (!range) return;
+
+  range.min = '0';
+  range.max = String(SIDEBAR_PRICE_MAX);
+  range.step = '1000';
+  range.value = String(selectedPriceMax);
+
+  range.oninput = (event) => {
+    const value = Number(event.target.value);
+    selectedPriceMax = Number.isFinite(value) ? value : SIDEBAR_PRICE_MAX;
+    updateSidebarPriceLabel();
+    searchProducts();
+  };
+
+  updateSidebarPriceLabel();
 }
 
 function initMainSearchEvents() {
@@ -470,7 +535,7 @@ function renderAdminProductsTable(products) {
   if (!body) return;
 
   if (!products.length) {
-    body.innerHTML = '<tr><td colspan="6" class="text-center py-4">Nincs találat.</td></tr>';
+    body.innerHTML = '<tr><td colspan="7" class="text-center py-4">Nincs találat.</td></tr>';
     return;
   }
 
@@ -480,6 +545,7 @@ function renderAdminProductsTable(products) {
     const category = prod.prod_category || '';
     const name = prod.prod_name || '';
     const image = prod.prod_image || '';
+    const sale = Boolean(prod.prod_sale);
     const imageFileName = getImageFileName(image);
 
     return `
@@ -496,6 +562,16 @@ function renderAdminProductsTable(products) {
         </td>
         <td style="max-width: 150px;">
           <input type="number" step="0.01" min="0" class="form-control form-control-sm" id="admin-price-${id}" value="${price.toFixed(2)}" ${id ? '' : 'disabled'}>
+        </td>
+        <td style="min-width: 160px;">
+          <div class="form-check form-check-inline">
+            <input class="form-check-input" type="radio" name="admin-sale-${id}" id="admin-sale-no-${id}" value="0" ${sale ? '' : 'checked'} ${id ? '' : 'disabled'}>
+            <label class="form-check-label" for="admin-sale-no-${id}">Nem</label>
+          </div>
+          <div class="form-check form-check-inline">
+            <input class="form-check-input" type="radio" name="admin-sale-${id}" id="admin-sale-yes-${id}" value="1" ${sale ? 'checked' : ''} ${id ? '' : 'disabled'}>
+            <label class="form-check-label" for="admin-sale-yes-${id}">Igen</label>
+          </div>
         </td>
         <td>
           <button class="btn btn-sm btn-outline-primary me-2" onclick="updateAdminProduct(${id})" ${id ? '' : 'disabled'}>Mentés</button>
@@ -528,26 +604,26 @@ async function loadAdminProducts() {
   const body = document.getElementById('admin-products-table-body');
   if (!body) return;
 
-  body.innerHTML = '<tr><td colspan="6" class="text-center py-4">Termékek betöltése...</td></tr>';
+  body.innerHTML = '<tr><td colspan="7" class="text-center py-4">Termékek betöltése...</td></tr>';
 
   try {
     const res = await fetch('http://localhost:5000/products');
     const result = await res.json();
 
     if (!res.ok || !result.success) {
-      body.innerHTML = '<tr><td colspan="6" class="text-center text-danger py-4">Nem sikerült betölteni a termékeket.</td></tr>';
+      body.innerHTML = '<tr><td colspan="7" class="text-center text-danger py-4">Nem sikerült betölteni a termékeket.</td></tr>';
       return;
     }
 
     adminProductsCache = result.products || [];
     if (!adminProductsCache.length) {
-      body.innerHTML = '<tr><td colspan="6" class="text-center py-4">Nincsenek termékek.</td></tr>';
+      body.innerHTML = '<tr><td colspan="7" class="text-center py-4">Nincsenek termékek.</td></tr>';
       return;
     }
 
     filterAdminProductsList();
   } catch (error) {
-    body.innerHTML = `<tr><td colspan="6" class="text-center text-danger py-4">Hiba: ${error.message}</td></tr>`;
+    body.innerHTML = `<tr><td colspan="7" class="text-center text-danger py-4">Hiba: ${error.message}</td></tr>`;
   }
 }
 
@@ -558,6 +634,8 @@ async function handleAdminAddProduct(event) {
   const price = document.getElementById('admin-prod-price')?.value;
   const category = document.getElementById('admin-prod-category')?.value.trim() || '';
   const image = document.getElementById('admin-prod-image')?.value.trim() || '';
+  const saleValue = document.querySelector('input[name="admin-prod-sale"]:checked')?.value || '0';
+  const sale = saleValue === '1';
   const requesterEmail = getRequesterEmailForAdmin();
 
   if (!name || price === '') {
@@ -574,7 +652,8 @@ async function handleAdminAddProduct(event) {
         prod_name: name,
         prod_price: Number(price),
         prod_category: category,
-        prod_image: image
+        prod_image: image,
+        prod_sale: sale
       })
     });
 
@@ -600,11 +679,13 @@ async function updateAdminProduct(prodId) {
   const categoryInput = document.getElementById(`admin-category-${prodId}`);
   const imageInput = document.getElementById(`admin-image-${prodId}`);
   const priceInput = document.getElementById(`admin-price-${prodId}`);
+  const saleInput = document.querySelector(`input[name="admin-sale-${prodId}"]:checked`);
   const requesterEmail = getRequesterEmailForAdmin();
   const newName = nameInput ? nameInput.value.trim() : '';
   const newCategory = categoryInput ? categoryInput.value.trim() : '';
   const newImage = imageInput ? imageInput.value.trim() : '';
   const newPrice = priceInput ? Number(priceInput.value) : NaN;
+  const newSale = saleInput ? saleInput.value === '1' : false;
 
   if (!newName) {
     showAdminTableMessage('A név nem lehet üres.', true);
@@ -625,7 +706,8 @@ async function updateAdminProduct(prodId) {
         prod_name: newName,
         prod_category: newCategory,
         prod_image: newImage,
-        prod_price: newPrice
+        prod_price: newPrice,
+        prod_sale: newSale
       })
     });
 
@@ -703,6 +785,7 @@ document.addEventListener("DOMContentLoaded", () => {
   renderProducts(selectedCategory);
   updateProductCartUI();
   initMainSearchEvents();
+  initSidebarPriceFilter();
 });
 
 async function handleRegister(event) {
@@ -731,11 +814,57 @@ async function handleRegister(event) {
     const result = await res.json();
 
     if (res.ok && result.success) {
-      loadPage('register_done');
+      sessionStorage.setItem('pendingVerificationEmail', email);
+      const formSection = document.getElementById('register-form-section');
+      const verifySection = document.getElementById('verify-section');
+      if (formSection) formSection.style.display = 'none';
+      if (verifySection) verifySection.style.display = 'block';
+      messageElement.textContent = '';
       return;
     }
 
     messageElement.textContent = result.error || 'Hiba történt a regisztrációnál.';
+    messageElement.style.color = 'red';
+  } catch (error) {
+    messageElement.textContent = 'Kapcsolati hiba: ' + error.message;
+    messageElement.style.color = 'red';
+  }
+}
+
+
+async function handleVerifyEmail(event) {
+  event.preventDefault();
+  const code = document.getElementById("verify-code").value.trim();
+  const messageElement = document.getElementById("verify-message");
+  const email = sessionStorage.getItem('pendingVerificationEmail') || '';
+
+  if (!email) {
+    messageElement.textContent = 'Nincs regisztrációs session. Próbáld újra.';
+    messageElement.style.color = 'red';
+    return;
+  }
+
+  const apiUrl = 'http://localhost:5000/verify-email';
+
+  try {
+    const res = await fetch(apiUrl, {
+      method: "POST",
+      headers: {"Content-Type":"application/json"},
+      body: JSON.stringify({email, code})
+    });
+    const result = await res.json();
+
+    if (res.ok && result.success) {
+      sessionStorage.removeItem('pendingVerificationEmail');
+      messageElement.textContent = 'Email sikeresen megerősítve! Átirányítunk...';
+      messageElement.style.color = 'green';
+      setTimeout(() => {
+        loadPage('register_done');
+      }, 2000);
+      return;
+    }
+
+    messageElement.textContent = result.error || 'Nem sikerült az email megerősítése.';
     messageElement.style.color = 'red';
   } catch (error) {
     messageElement.textContent = 'Kapcsolati hiba: ' + error.message;
