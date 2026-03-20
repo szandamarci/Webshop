@@ -83,6 +83,7 @@ async function loadPage(page) {
 
 let selectedCategory = null;
 const SIDEBAR_PRICE_MAX = 10000000;
+let selectedPriceMin = 0;
 let selectedPriceMax = SIDEBAR_PRICE_MAX;
 let selectedSaleOnly = false;
 
@@ -235,7 +236,7 @@ function searchProducts() {
     const alt = col.querySelector('.card-img-top')?.alt?.toLowerCase() || '';
     const content = `${title} ${priceText} ${alt}`;
     const productPrice = getProductPriceFromCard(col);
-    const matchesPrice = productPrice <= selectedPriceMax;
+    const matchesPrice = productPrice >= selectedPriceMin && productPrice <= selectedPriceMax;
 
     if ((!query || content.includes(query)) && matchesPrice) {
       col.style.display = '';
@@ -263,21 +264,54 @@ function getProductPriceFromCard(cardCol) {
 function updateSidebarPriceLabel() {
   const label = document.getElementById('sidebar-price-value');
   if (!label) return;
-  label.textContent = `0 - ${selectedPriceMax.toLocaleString('hu-HU')} Ft`;
+  label.textContent = `${selectedPriceMin.toLocaleString('hu-HU')} Ft - ${selectedPriceMax.toLocaleString('hu-HU')} Ft`;
+}
+
+function normalizeSidebarPriceValue(value, fallback) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(SIDEBAR_PRICE_MAX, Math.max(0, parsed));
 }
 
 function initSidebarPriceFilter() {
-  const range = document.getElementById('sidebar-price-range');
-  if (!range) return;
+  const minInput = document.getElementById('sidebar-price-min');
+  const maxInput = document.getElementById('sidebar-price-max');
+  if (!minInput || !maxInput) return;
 
-  range.min = '0';
-  range.max = String(SIDEBAR_PRICE_MAX);
-  range.step = '1000';
-  range.value = String(selectedPriceMax);
+  minInput.min = '0';
+  minInput.max = String(SIDEBAR_PRICE_MAX);
+  minInput.step = '1000';
+  minInput.value = String(selectedPriceMin);
 
-  range.oninput = (event) => {
-    const value = Number(event.target.value);
-    selectedPriceMax = Number.isFinite(value) ? value : SIDEBAR_PRICE_MAX;
+  maxInput.min = '0';
+  maxInput.max = String(SIDEBAR_PRICE_MAX);
+  maxInput.step = '1000';
+  maxInput.value = String(selectedPriceMax);
+
+  minInput.oninput = (event) => {
+    selectedPriceMin = normalizeSidebarPriceValue(event.target.value, 0);
+
+    if (selectedPriceMin > selectedPriceMax) {
+      selectedPriceMax = selectedPriceMin;
+      maxInput.value = String(selectedPriceMax);
+    }
+
+    event.target.value = String(selectedPriceMin);
+
+    updateSidebarPriceLabel();
+    searchProducts();
+  };
+
+  maxInput.oninput = (event) => {
+    selectedPriceMax = normalizeSidebarPriceValue(event.target.value, SIDEBAR_PRICE_MAX);
+
+    if (selectedPriceMax < selectedPriceMin) {
+      selectedPriceMin = selectedPriceMax;
+      minInput.value = String(selectedPriceMin);
+    }
+
+    event.target.value = String(selectedPriceMax);
+
     updateSidebarPriceLabel();
     searchProducts();
   };
