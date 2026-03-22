@@ -1,9 +1,13 @@
 import hashlib
+import json
+import os
 import pyodbc
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import smtplib
 import secrets
+import urllib.error
+import urllib.request
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from datetime import datetime, timedelta
@@ -32,6 +36,14 @@ DB_CONFIG = {
     'server': 'localhost\\SQLEXPRESS',
     'database': 'WebshopDB',
     'trusted_connection': 'yes'
+}
+
+BARION_CONFIG = {
+    'pos_key': os.getenv('BARION_POS_KEY', '').strip(),
+    'payee': os.getenv('BARION_PAYEE', '').strip(),
+    'api_base': os.getenv('BARION_API_BASE', 'https://api.test.barion.com').rstrip('/'),
+    'frontend_base_url': os.getenv('FRONTEND_BASE_URL', 'http://localhost:5500').rstrip('/'),
+    'backend_base_url': os.getenv('BACKEND_BASE_URL', 'http://localhost:5000').rstrip('/'),
 }
 
 
@@ -237,6 +249,72 @@ def get_products_columns(cursor):
     }
 
 
+def call_barion_api(path: str, payload: dict) -> dict:
+    url = f"{BARION_CONFIG['api_base']}{path}"
+    encoded_payload = json.dumps(payload).encode('utf-8')
+    request_obj = urllib.request.Request(
+        url,
+        data=encoded_payload,
+        headers={'Content-Type': 'application/json'},
+        method='POST'
+    )
+
+    try:
+        with urllib.request.urlopen(request_obj, timeout=20) as response:
+            response_data = response.read().decode('utf-8')
+            return json.loads(response_data) if response_data else {}
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode('utf-8') if exc else ''
+        try:
+            parsed = json.loads(body) if body else {}
+        except json.JSONDecodeError:
+            parsed = {'raw': body}
+        return {
+            'Errors': [
+                {
+                    'Title': 'Barion HTTP error',
+                    'Description': str(exc),
+                    'Details': parsed
+                }
+            ]
+        }
+    except Exception as exc:
+        return {
+            'Errors': [
+                {
+                    'Title': 'Barion request failed',
+                    'Description': str(exc)
+                }
+            ]
+        }
+
+
+def build_barion_items(raw_items: list) -> list:
+    prepared = []
+    for item in raw_items:
+        name = str(item.get('name', '')).strip()
+        quantity = int(item.get('quantity', 0) or 0)
+        unit_price = float(item.get('price', 0) or 0)
+
+        if not name or quantity <= 0 or unit_price < 0:
+            continue
+
+        prepared.append(
+            {
+                'Name': name,
+                'Description': str(item.get('desc', name)).strip() or name,
+                'Quantity': quantity,
+                'Unit': 'db',
+                'UnitPrice': unit_price,
+                'ItemTotal': round(quantity * unit_price, 2),
+                'SKU': str(item.get('sku', name)).strip()[:100],
+                'Kind': 'Physical'
+            }
+        )
+
+    return prepared
+
+
 def get_products(category: str = None) -> list:
     ensure_products_table_exists()
 
@@ -317,6 +395,126 @@ def get_products(category: str = None) -> list:
         products.append(product)
 
     return products
+
+
+@app.route('/create-payment/barion', methods=['POST'])
+def create_barion_payment_endpoint():
+    data = request.get_json(force=True, silent=True) or {}
+    items = data.get('items', [])
+    billing = data.get('billing', {})
+    redirect_origin = str(data.get('redirectOrigin', '')).strip()
+
+    if not isinstance(items, list) or not items:
+        return jsonify({'success': False, 'error': 'A kosár üres vagy érvénytelen.'}), 400
+
+    if not BARION_CONFIG['pos_key'] or not BARION_CONFIG['payee']:
+        return jsonify(
+            {
+                'success': False,
+                'error': 'Hiányzó Barion konfiguráció. Állítsd be a BARION_POS_KEY és BARION_PAYEE környezeti változókat.'
+            }
+        ), 500
+
+    prepared_items = build_barion_items(items)
+    if not prepared_items:
+        return jsonify({'success': False, 'error': 'A kosár tételei érvénytelenek.'}), 400
+
+    computed_total = round(sum(item['ItemTotal'] for item in prepared_items), 2)
+
+    payer_email = str(billing.get('email', '')).strip()
+    payer_name = f"{str(billing.get('firstName', '')).strip()} {str(billing.get('lastName', '')).strip()}".strip()
+
+    frontend_base = redirect_origin.rstrip('/') if redirect_origin else BARION_CONFIG['frontend_base_url']
+    redirect_url = f"{frontend_base}/payment.html?provider=barion"
+    callback_url = f"{BARION_CONFIG['backend_base_url']}/payment/callback/barion"
+
+    now_id = datetime.utcnow().strftime('%Y%m%d%H%M%S%f')
+    payment_request = {
+        'POSKey': BARION_CONFIG['pos_key'],
+        'PaymentType': 'Immediate',
+        'GuestCheckOut': True,
+        'FundingSources': ['All'],
+        'PaymentRequestId': f"ws-{now_id}",
+        'PayerHint': payer_email,
+        'PayerName': payer_name,
+        'Currency': 'HUF',
+        'RedirectUrl': redirect_url,
+        'CallbackUrl': callback_url,
+        'Locale': 'hu-HU',
+        'Transactions': [
+            {
+                'POSTransactionId': f"txn-{now_id}",
+                'Payee': BARION_CONFIG['payee'],
+                'Total': computed_total,
+                'Items': prepared_items,
+            }
+        ]
+    }
+
+    barion_response = call_barion_api('/v2/Payment/Start', payment_request)
+    gateway_url = barion_response.get('GatewayUrl')
+    payment_id = barion_response.get('PaymentId')
+
+    if gateway_url and payment_id:
+        return jsonify(
+            {
+                'success': True,
+                'provider': 'barion',
+                'paymentId': payment_id,
+                'url': gateway_url,
+            }
+        ), 200
+
+    return jsonify(
+        {
+            'success': False,
+            'error': 'A Barion fizetés indítása sikertelen.',
+            'details': barion_response,
+        }
+    ), 502
+
+
+@app.route('/payment/callback/barion', methods=['POST'])
+def payment_callback_barion_endpoint():
+    data = request.get_json(force=True, silent=True) or {}
+    payment_id = str(data.get('PaymentId', '')).strip()
+
+    if not payment_id:
+        return jsonify({'received': False, 'error': 'Missing PaymentId'}), 400
+
+    payment_state = call_barion_api(
+        '/v2/Payment/GetPaymentState',
+        {
+            'POSKey': BARION_CONFIG['pos_key'],
+            'PaymentId': payment_id,
+        }
+    )
+
+    print('Barion callback payment state:', payment_state)
+    return jsonify({'received': True}), 200
+
+
+@app.route('/payment/state/barion/<payment_id>', methods=['GET'])
+def payment_state_barion_endpoint(payment_id: str):
+    payment_id = (payment_id or '').strip()
+    if not payment_id:
+        return jsonify({'success': False, 'error': 'Hiányzó PaymentId.'}), 400
+
+    if not BARION_CONFIG['pos_key']:
+        return jsonify({'success': False, 'error': 'Hiányzó BARION_POS_KEY konfiguráció.'}), 500
+
+    payment_state = call_barion_api(
+        '/v2/Payment/GetPaymentState',
+        {
+            'POSKey': BARION_CONFIG['pos_key'],
+            'PaymentId': payment_id,
+        }
+    )
+
+    if payment_state.get('Errors'):
+        return jsonify({'success': False, 'details': payment_state}), 502
+
+    return jsonify({'success': True, 'state': payment_state}), 200
 
 
 def register_user(email: str, password: str, first_name: str = '', last_name: str = '') -> dict:
@@ -474,6 +672,38 @@ def login_endpoint():
     result = login_user(email, password)
     status = 200 if result.get('success') else 401
     return jsonify(result), status
+
+
+@app.route('/users/profile', methods=['GET'])
+def user_profile_endpoint():
+    email = request.args.get('email', '').strip().lower()
+    if not email:
+        return jsonify({'success': False, 'error': 'Email megadása kötelező.'}), 400
+
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        ensure_users_table_exists()
+
+        cursor.execute(
+            "SELECT user_email, user_firstname, user_lastname FROM Users WHERE user_email = ?",
+            (email,)
+        )
+        row = cursor.fetchone()
+
+    if not row:
+        return jsonify({'success': False, 'error': 'Felhasználó nem található.'}), 404
+
+    user_email, first_name, last_name = row
+    return jsonify(
+        {
+            'success': True,
+            'user': {
+                'email': user_email or '',
+                'firstName': first_name or '',
+                'lastName': last_name or '',
+            }
+        }
+    ), 200
 
 
 @app.route('/products', methods=['GET'])

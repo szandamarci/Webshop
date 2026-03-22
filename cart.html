@@ -34,29 +34,7 @@
 
         <h1>Fizetési lehetőségek</h1>
         <div>
-            <button id="pay-barion" class="btn btn-primary">Fizetés Barion-nal</button>
+            <button id="forward-to-payment" class="btn btn-primary">Tovább a fizetéshez</button>
         </div>
-        <div class="mt-3">
-            <button id="pay-simplepay" class="btn btn-primary">Fizetés SimplePay-jel</button>
-        </div>
-        <script>
-        async function checkout(provider) {
-        const cartItems = window.cartItems || [{name:'Tesztdog',quantity:1,price:100}]; // kapcs.
-        const total = cartItems.reduce((s,i)=>s+i.price*i.quantity, 0);
-
-        const url = `/create-payment/${provider}`;
-        const r = await fetch(url, {
-            method:'POST',
-            headers:{ 'Content-Type':'application/json' },
-            body: JSON.stringify({ items: cartItems, total })
-        });
-        const json = await r.json();
-        if (json.url) window.location = json.url;
-        else alert('Hiba: ' + JSON.stringify(json));
-        }
-
-        document.getElementById('pay-barion').onclick = ()=> checkout('barion');
-        document.getElementById('pay-simplepay').onclick = ()=> checkout('simplepay');
-        </script>
     </body>
 </html>

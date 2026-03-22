@@ -1,4 +1,24 @@
-async function loadPage(page) {
+const pageHistory = ['index'];
+
+function navigateBackPage(fallbackPage = 'index') {
+  if (pageHistory.length > 1) {
+    pageHistory.pop();
+    const previousPage = pageHistory[pageHistory.length - 1];
+    loadPage(previousPage, { skipHistory: true });
+    return;
+  }
+
+  loadPage(fallbackPage, { skipHistory: true });
+}
+
+async function loadPage(page, options = {}) {
+  const skipHistory = Boolean(options?.skipHistory);
+  if (!skipHistory) {
+    const lastPage = pageHistory[pageHistory.length - 1];
+    if (lastPage !== page) {
+      pageHistory.push(page);
+    }
+  }
 
   if (page === "about") {
     const content = document.getElementById("content");
@@ -9,6 +29,22 @@ async function loadPage(page) {
   }
 
   if (page === "contact") {
+    const content = document.getElementById("content");
+    const response = await fetch(`${page}.html`);
+    if (!response.ok) throw new Error('Page not found');
+    const html = await response.text();
+    content.innerHTML = html;
+  }
+
+  if (page === "privacy") {
+    const content = document.getElementById("content");
+    const response = await fetch(`${page}.html`);
+    if (!response.ok) throw new Error('Page not found');
+    const html = await response.text();
+    content.innerHTML = html;
+  }
+
+  if (page === "terms") {
     const content = document.getElementById("content");
     const response = await fetch(`${page}.html`);
     if (!response.ok) throw new Error('Page not found');
@@ -55,7 +91,13 @@ async function loadPage(page) {
     const html = await response.text();
     content.innerHTML = html;
   }
-
+  if (page === "payment") {
+    const content = document.getElementById("content");
+    const response = await fetch(`${page}.html`);
+    if (!response.ok) throw new Error('Page not found');
+    const html = await response.text();
+    content.innerHTML = html;
+  }
   if (page === "admin") {
     const user = getCurrentUser();
     if (!user || !user.isAdmin) {
@@ -79,6 +121,7 @@ async function loadPage(page) {
   updateProductCartUI();
   initMainSearchEvents();
   initSidebarPriceFilter();
+  initPaymentPage();
 }
 
 let selectedCategory = null;
@@ -411,6 +454,248 @@ function renderCartItems() {
   updateProductCartUI();
 }
 
+function getPaymentStatusElement() {
+  return document.getElementById('payment-status');
+}
+
+function showPaymentStatus(message, isError = false) {
+  const status = getPaymentStatusElement();
+  if (!status) return;
+
+  status.textContent = message;
+  status.className = isError ? 'mt-3 text-danger' : 'mt-3 text-success';
+}
+
+function hasAcceptedLegalCheckboxes() {
+  const readTerms = document.getElementById('read-terms-and-conditions');
+  const readPrivacy = document.getElementById('read-privacy-policy');
+  return Boolean(readTerms?.checked && readPrivacy?.checked);
+}
+
+function updatePaymentButtonsState() {
+  const barionButton = document.getElementById('pay-barion');
+  const simplePayButton = document.getElementById('pay-simplepay');
+  const isAccepted = hasAcceptedLegalCheckboxes();
+
+  if (barionButton) barionButton.disabled = !isAccepted;
+  if (simplePayButton) simplePayButton.disabled = !isAccepted;
+}
+
+function collectBillingFormData() {
+  const requiredFields = [
+    ['billing-email', 'email'],
+    ['billing-phone', 'phone'],
+    ['billing-first-name', 'firstName'],
+    ['billing-last-name', 'lastName'],
+    ['billing-address', 'address'],
+    ['billing-city', 'city'],
+    ['billing-zip', 'zip'],
+    ['billing-country', 'country']
+  ];
+
+  const billing = {};
+  for (const [id, key] of requiredFields) {
+    const input = document.getElementById(id);
+    const value = input ? input.value.trim() : '';
+    if (!value) {
+      showPaymentStatus('Kérlek tölts ki minden számlázási mezőt.', true);
+      if (input) input.focus();
+      return null;
+    }
+    billing[key] = value;
+  }
+
+  return billing;
+}
+
+function renderPaymentSummary() {
+  const info = document.getElementById('billing-info');
+  if (!info) return;
+
+  const items = cartItems || [];
+  const total = items.reduce((sum, item) => sum + Number(item.price || 0) * Number(item.quantity || 1), 0);
+
+  if (!items.length) {
+    info.innerHTML = '<div class="alert alert-warning">A kosár üres. Előbb adj termékeket a kosárhoz.</div>';
+    return;
+  }
+
+  const list = items
+    .map((item) => `<li>${escapeHtml(item.name)} - ${Number(item.quantity || 1)} x ${Number(item.price || 0).toFixed(2)} Ft</li>`)
+    .join('');
+
+  info.innerHTML = `
+    <div class="alert alert-light border">
+      <strong>Rendelés összesítő</strong>
+      <ul class="mb-2 mt-2">${list}</ul>
+      <div><strong>Fizetendő:</strong> ${total.toFixed(2)} Ft</div>
+    </div>
+  `;
+}
+
+async function startBarionCheckout() {
+  if (!hasAcceptedLegalCheckboxes()) {
+    showPaymentStatus('A fizetéshez fogadd el az ÁSZF-et és az Adatvédelmi Szabályzatot.', true);
+    updatePaymentButtonsState();
+    return;
+  }
+
+  if (!cartItems.length) {
+    showPaymentStatus('A kosár üres, nem indítható fizetés.', true);
+    return;
+  }
+
+  const billing = collectBillingFormData();
+  if (!billing) return;
+
+  const button = document.getElementById('pay-barion');
+  if (button) button.disabled = true;
+  showPaymentStatus('Barion fizetés indítása...');
+
+  const payload = {
+    items: cartItems,
+    billing,
+    redirectOrigin: window.location.origin
+  };
+
+  try {
+    const res = await fetch('http://localhost:5000/create-payment/barion', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+
+    const result = await res.json();
+    if (!res.ok || !result.success || !result.url) {
+      const apiError = result?.error || 'A Barion fizetés indítása sikertelen.';
+      showPaymentStatus(apiError, true);
+      return;
+    }
+
+    window.location.href = result.url;
+  } catch (error) {
+    showPaymentStatus(`Hálózati hiba: ${error.message}`, true);
+  } finally {
+    if (button) button.disabled = false;
+    updatePaymentButtonsState();
+  }
+}
+
+function startSimplePayCheckout(event) {
+  if (event) event.preventDefault();
+
+  if (!hasAcceptedLegalCheckboxes()) {
+    showPaymentStatus('A fizetéshez fogadd el az ÁSZF-et és az Adatvédelmi Szabályzatot.', true);
+    updatePaymentButtonsState();
+    return;
+  }
+
+  showPaymentStatus('A SimplePay fizetés hamarosan elérhető lesz.', true);
+}
+
+async function resolveBarionReturn() {
+  const params = new URLSearchParams(window.location.search);
+  const provider = (params.get('provider') || '').toLowerCase();
+  const paymentId = params.get('paymentId') || params.get('PaymentId') || '';
+
+  if (provider !== 'barion' || !paymentId) return;
+
+  showPaymentStatus('Fizetés állapotának ellenőrzése...');
+
+  try {
+    const res = await fetch(`http://localhost:5000/payment/state/barion/${encodeURIComponent(paymentId)}`);
+    const result = await res.json();
+
+    if (!res.ok || !result.success) {
+      showPaymentStatus('Nem sikerült lekérni a fizetés állapotát.', true);
+      return;
+    }
+
+    const status = (result.state?.Status || '').toLowerCase();
+    if (status === 'succeeded') {
+      cartItems = [];
+      saveCart();
+      updateCartBadge();
+      renderCartItems();
+      renderPaymentSummary();
+      showPaymentStatus('A fizetés sikeres volt. Köszönjük a rendelést!');
+      return;
+    }
+
+    if (status === 'canceled' || status === 'failed') {
+      showPaymentStatus('A fizetés nem sikerült vagy megszakadt. Próbáld újra.', true);
+      return;
+    }
+
+    showPaymentStatus(`Fizetés státusz: ${result.state?.Status || 'ismeretlen'}`, true);
+  } catch (error) {
+    showPaymentStatus(`Hiba az állapot lekérdezésekor: ${error.message}`, true);
+  }
+}
+
+async function fillBillingFromCurrentUser() {
+  const user = getCurrentUser();
+  if (!user?.email) return;
+
+  try {
+    const res = await fetch(`http://localhost:5000/users/profile?email=${encodeURIComponent(user.email)}`);
+    const result = await res.json();
+    if (!res.ok || !result.success || !result.user) return;
+
+    const billingEmail = document.getElementById('billing-email');
+    const billingLastName = document.getElementById('billing-first-name');
+    const billingFirstName = document.getElementById('billing-last-name');
+
+    if (billingEmail && !billingEmail.value.trim()) {
+      billingEmail.value = result.user.email || '';
+    }
+
+    // Map DB names to field labels: Vezeteknev -> user.lastName, Keresztnev -> user.firstName.
+    if (billingLastName && !billingLastName.value.trim()) {
+      billingLastName.value = result.user.lastName || '';
+    }
+
+    if (billingFirstName && !billingFirstName.value.trim()) {
+      billingFirstName.value = result.user.firstName || '';
+    }
+  } catch (error) {
+    console.error('Billing autofill failed:', error);
+  }
+}
+
+function initPaymentPage() {
+  const barionButton = document.getElementById('pay-barion');
+  const simplePayButton = document.getElementById('pay-simplepay');
+  if (!barionButton) return;
+
+  barionButton.removeEventListener('click', startBarionCheckout);
+  barionButton.addEventListener('click', startBarionCheckout);
+
+  if (simplePayButton) {
+    simplePayButton.removeEventListener('click', startSimplePayCheckout);
+    simplePayButton.addEventListener('click', startSimplePayCheckout);
+  }
+
+  const readTerms = document.getElementById('read-terms-and-conditions');
+  const readPrivacy = document.getElementById('read-privacy-policy');
+
+  if (readTerms) {
+    readTerms.removeEventListener('change', updatePaymentButtonsState);
+    readTerms.addEventListener('change', updatePaymentButtonsState);
+  }
+
+  if (readPrivacy) {
+    readPrivacy.removeEventListener('change', updatePaymentButtonsState);
+    readPrivacy.addEventListener('change', updatePaymentButtonsState);
+  }
+
+  updatePaymentButtonsState();
+
+  renderPaymentSummary();
+  resolveBarionReturn();
+  fillBillingFromCurrentUser();
+}
+
 function getCartItem(name, price) {
   return cartItems.find(i => i.name === name && Number(i.price) === Number(price));
 }
@@ -497,6 +782,14 @@ function initCartEvents() {
     btn.removeEventListener("click", handleAddToCart);
     btn.addEventListener("click", handleAddToCart);
   });
+
+const forwardButton = document.getElementById('forward-to-payment');
+  if (forwardButton) {
+    forwardButton.onclick = (event) => {
+      event.preventDefault();
+      loadPage('payment');
+    };
+  }
 }
 
 function handleAddToCart(event) {
@@ -820,6 +1113,7 @@ document.addEventListener("DOMContentLoaded", () => {
   updateProductCartUI();
   initMainSearchEvents();
   initSidebarPriceFilter();
+  initPaymentPage();
 });
 
 async function handleRegister(event) {
