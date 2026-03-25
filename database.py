@@ -328,6 +328,307 @@ def ensure_orders_shipping_type_column_exists():
         conn.commit()
 
 
+def ensure_carts_tables_exist():
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            IF NOT EXISTS (SELECT * FROM sys.tables WHERE name='Carts')
+            CREATE TABLE Carts (
+                id INT IDENTITY(1,1) PRIMARY KEY,
+                user_id INT NULL,
+                session_id NVARCHAR(255) NULL,
+                status NVARCHAR(50) NOT NULL DEFAULT 'active',
+                created_at DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME(),
+                updated_at DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME()
+            );
+
+            IF NOT EXISTS (SELECT * FROM sys.tables WHERE name='Cart_items')
+            CREATE TABLE Cart_items (
+                id INT IDENTITY(1,1) PRIMARY KEY,
+                cart_id INT NOT NULL,
+                product_id INT NOT NULL,
+                quantity INT NOT NULL,
+                unit_price_snapshot FLOAT NOT NULL,
+                created_at DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME(),
+                updated_at DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME()
+            );
+            """
+        )
+        conn.commit()
+
+
+def get_table_columns(cursor, table_name: str) -> dict:
+    cursor.execute(
+        """
+        SELECT LOWER(COLUMN_NAME), LOWER(DATA_TYPE)
+        FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_NAME = ?
+        """,
+        (table_name,)
+    )
+    rows = cursor.fetchall()
+    return {row[0]: row[1] for row in rows}
+
+
+def get_carts_columns(cursor):
+    existing = get_table_columns(cursor, 'Carts')
+    return {
+        'existing': existing,
+        'id': 'id' if 'id' in existing else None,
+        'user_id': 'user_id' if 'user_id' in existing else None,
+        'session_id': 'session_id' if 'session_id' in existing else None,
+        'status': 'status' if 'status' in existing else None,
+        'created_at': 'created_at' if 'created_at' in existing else None,
+        'updated_at': 'updated_at' if 'updated_at' in existing else None,
+        'session_type': existing.get('session_id')
+    }
+
+
+def get_cart_items_columns(cursor):
+    existing = get_table_columns(cursor, 'Cart_items')
+    return {
+        'existing': existing,
+        'id': 'id' if 'id' in existing else None,
+        'cart_id': 'cart_id' if 'cart_id' in existing else None,
+        'product_id': 'product_id' if 'product_id' in existing else None,
+        'quantity': 'quantity' if 'quantity' in existing else None,
+        'unit_price_snapshot': 'unit_price_snapshot' if 'unit_price_snapshot' in existing else None,
+        'created_at': 'created_at' if 'created_at' in existing else ('crated_at' if 'crated_at' in existing else None),
+        'updated_at': 'updated_at' if 'updated_at' in existing else None,
+    }
+
+
+def normalize_session_id_for_db(raw_session_id: str, data_type: str):
+    session_id = str(raw_session_id or '').strip()
+    if not session_id:
+        return None
+
+    data_type = (data_type or '').lower()
+    if data_type in {'tinyint', 'smallint', 'int', 'bigint'}:
+        digest = hashlib.md5(session_id.encode('utf-8')).hexdigest()[:8]
+        value = int(digest, 16)
+        if data_type == 'tinyint':
+            return value % 255
+        if data_type == 'smallint':
+            return value % 32767
+        if data_type == 'int':
+            return value % 2147483647
+        return value
+
+    return session_id[:255]
+
+
+def get_user_id_by_email(cursor, email: str):
+    mail = (email or '').strip().lower()
+    if not mail:
+        return None
+
+    cursor.execute("SELECT user_id FROM Users WHERE LOWER(user_email) = LOWER(?)", (mail,))
+    row = cursor.fetchone()
+    if not row:
+        return None
+    return int(row[0])
+
+
+def get_product_id_by_name(cursor, product_name: str):
+    name = (product_name or '').strip()
+    if not name:
+        return None
+
+    ensure_products_table_exists()
+    cols = get_products_columns(cursor)
+    id_col = cols['id']
+    name_col = cols['name']
+
+    if not id_col or not name_col:
+        return None
+
+    cursor.execute(
+        f"SELECT TOP 1 {id_col} FROM Products WHERE LOWER({name_col}) = LOWER(?) ORDER BY {id_col}",
+        (name,)
+    )
+    row = cursor.fetchone()
+    if not row:
+        return None
+    return int(row[0])
+
+
+def get_or_create_active_cart(cursor, carts_cols: dict, user_id, session_id):
+    id_col = carts_cols['id']
+    status_col = carts_cols['status']
+    user_col = carts_cols['user_id']
+    session_col = carts_cols['session_id']
+
+    if not id_col or not status_col:
+        raise ValueError('A Carts tábla hiányos: id/status oszlop nem található.')
+
+    if user_id and user_col:
+        cursor.execute(
+            f"SELECT TOP 1 {id_col} FROM Carts WHERE {status_col} = ? AND {user_col} = ? ORDER BY {id_col} DESC",
+            ('active', user_id)
+        )
+        row = cursor.fetchone()
+        if row:
+            return int(row[0])
+
+    elif session_id is not None and session_col:
+        cursor.execute(
+            f"SELECT TOP 1 {id_col} FROM Carts WHERE {status_col} = ? AND {session_col} = ? ORDER BY {id_col} DESC",
+            ('active', session_id)
+        )
+        row = cursor.fetchone()
+        if row:
+            return int(row[0])
+
+    columns = []
+    values = []
+    placeholders = []
+
+    if user_col:
+        columns.append(user_col)
+        values.append(user_id)
+        placeholders.append('?')
+
+    if session_col:
+        columns.append(session_col)
+        values.append(session_id)
+        placeholders.append('?')
+
+    columns.append(status_col)
+    values.append('active')
+    placeholders.append('?')
+
+    now = datetime.utcnow()
+    if carts_cols['created_at']:
+        columns.append(carts_cols['created_at'])
+        values.append(now)
+        placeholders.append('?')
+    if carts_cols['updated_at']:
+        columns.append(carts_cols['updated_at'])
+        values.append(now)
+        placeholders.append('?')
+
+    cursor.execute(
+        f"INSERT INTO Carts ({', '.join(columns)}) OUTPUT INSERTED.{id_col} VALUES ({', '.join(placeholders)})",
+        values
+    )
+    row = cursor.fetchone()
+    return int(row[0]) if (row and row[0] is not None) else 0
+
+
+@app.route('/cart/items/sync', methods=['POST'])
+def sync_cart_item_endpoint():
+    data = request.get_json(force=True, silent=True) or {}
+
+    item_name = str(data.get('itemName', '')).strip()
+    user_email = str(data.get('userEmail', '')).strip().lower()
+    raw_session_id = str(data.get('sessionId', '')).strip()
+    quantity_raw = data.get('quantity', 0)
+    unit_price_raw = data.get('unitPrice', 0)
+
+    if not item_name:
+        return jsonify({'success': False, 'error': 'itemName megadása kötelező.'}), 400
+
+    try:
+        quantity = int(quantity_raw)
+    except (TypeError, ValueError):
+        return jsonify({'success': False, 'error': 'quantity érvénytelen.'}), 400
+
+    try:
+        unit_price = float(unit_price_raw)
+    except (TypeError, ValueError):
+        return jsonify({'success': False, 'error': 'unitPrice érvénytelen.'}), 400
+
+    if quantity < 0:
+        return jsonify({'success': False, 'error': 'quantity nem lehet negatív.'}), 400
+
+    if not user_email and not raw_session_id:
+        return jsonify({'success': False, 'error': 'userEmail vagy sessionId megadása kötelező.'}), 400
+
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        ensure_users_table_exists()
+        ensure_carts_tables_exist()
+
+        carts_cols = get_carts_columns(cursor)
+        cart_items_cols = get_cart_items_columns(cursor)
+        if not cart_items_cols['cart_id'] or not cart_items_cols['product_id'] or not cart_items_cols['quantity']:
+            return jsonify({'success': False, 'error': 'A Cart_items tábla hiányos.'}), 500
+
+        product_id = get_product_id_by_name(cursor, item_name)
+        if not product_id:
+            return jsonify({'success': False, 'error': 'A termék nem található a Products táblában.'}), 404
+
+        user_id = get_user_id_by_email(cursor, user_email) if user_email else None
+        session_id = normalize_session_id_for_db(raw_session_id, carts_cols['session_type'])
+
+        cart_id = get_or_create_active_cart(cursor, carts_cols, user_id, session_id)
+        if not cart_id:
+            return jsonify({'success': False, 'error': 'Nem sikerült aktív kosarat létrehozni.'}), 500
+
+        cursor.execute(
+            f"""
+            SELECT TOP 1 {cart_items_cols['id']}
+            FROM Cart_items
+            WHERE {cart_items_cols['cart_id']} = ? AND {cart_items_cols['product_id']} = ?
+            """,
+            (cart_id, product_id)
+        )
+        existing_item = cursor.fetchone()
+
+        now = datetime.utcnow()
+        if quantity == 0:
+            cursor.execute(
+                f"DELETE FROM Cart_items WHERE {cart_items_cols['cart_id']} = ? AND {cart_items_cols['product_id']} = ?",
+                (cart_id, product_id)
+            )
+        elif existing_item:
+            updates = [
+                f"{cart_items_cols['quantity']} = ?",
+                f"{cart_items_cols['unit_price_snapshot']} = ?"
+            ]
+            params = [quantity, unit_price]
+
+            if cart_items_cols['updated_at']:
+                updates.append(f"{cart_items_cols['updated_at']} = ?")
+                params.append(now)
+
+            params.extend([cart_id, product_id])
+            cursor.execute(
+                f"UPDATE Cart_items SET {', '.join(updates)} WHERE {cart_items_cols['cart_id']} = ? AND {cart_items_cols['product_id']} = ?",
+                params
+            )
+        else:
+            insert_columns = [
+                cart_items_cols['cart_id'],
+                cart_items_cols['product_id'],
+                cart_items_cols['quantity'],
+                cart_items_cols['unit_price_snapshot']
+            ]
+            insert_values = [cart_id, product_id, quantity, unit_price]
+
+            if cart_items_cols['created_at']:
+                insert_columns.append(cart_items_cols['created_at'])
+                insert_values.append(now)
+            if cart_items_cols['updated_at']:
+                insert_columns.append(cart_items_cols['updated_at'])
+                insert_values.append(now)
+
+            placeholders = ', '.join(['?'] * len(insert_columns))
+            cursor.execute(
+                f"INSERT INTO Cart_items ({', '.join(insert_columns)}) VALUES ({placeholders})",
+                insert_values
+            )
+
+        if carts_cols['updated_at']:
+            cursor.execute(f"UPDATE Carts SET {carts_cols['updated_at']} = ? WHERE {carts_cols['id']} = ?", (now, cart_id))
+
+        conn.commit()
+
+    return jsonify({'success': True, 'cartId': cart_id, 'productId': product_id, 'quantity': quantity}), 200
+
+
 def is_admin_email(email: str) -> bool:
     return (email or '').strip().lower() in ADMIN_EMAILS
 

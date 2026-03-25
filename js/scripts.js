@@ -388,6 +388,49 @@ function initMainSearchEvents() {
 
 
 const CART_KEY = 'webshopCart';
+const GUEST_CART_SESSION_KEY = 'webshopGuestSessionId';
+
+function getOrCreateGuestSessionId() {
+  let sessionId = localStorage.getItem(GUEST_CART_SESSION_KEY);
+  if (sessionId) return sessionId;
+
+  sessionId = `guest-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+  localStorage.setItem(GUEST_CART_SESSION_KEY, sessionId);
+  return sessionId;
+}
+
+function getCartSyncIdentity() {
+  const user = getCurrentUser();
+  return {
+    userEmail: user?.email ? String(user.email).trim().toLowerCase() : '',
+    sessionId: getOrCreateGuestSessionId()
+  };
+}
+
+async function syncCartItemToDatabase(itemName, itemPrice, quantity) {
+  const name = String(itemName || '').trim();
+  if (!name) return;
+
+  const price = Number(itemPrice || 0);
+  const qty = Math.max(0, Number(quantity || 0));
+  const identity = getCartSyncIdentity();
+
+  try {
+    await fetch('http://localhost:5000/cart/items/sync', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        itemName: name,
+        unitPrice: price,
+        quantity: qty,
+        userEmail: identity.userEmail,
+        sessionId: identity.sessionId
+      })
+    });
+  } catch (error) {
+    console.error('Cart sync failed:', error);
+  }
+}
 
 function resetCartOnStartup() {
   localStorage.removeItem(CART_KEY);
@@ -729,10 +772,14 @@ async function submitAfterPayOrder(event) {
       return;
     }
 
+    const submittedItems = [...cartItems];
     cartItems = [];
     saveCart();
     updateCartBadge();
     renderCartItems();
+    submittedItems.forEach((item) => {
+      syncCartItemToDatabase(item.name, item.price, 0);
+    });
     sessionStorage.removeItem(AFTERPAY_CHECKOUT_DATA_KEY);
     loadPage('payment_done');
   } catch (error) {
@@ -895,6 +942,7 @@ function getCartQuantity(name, price) {
 
 function removeFromCart(itemName, itemPrice) {
   cartItems = cartItems.filter(i => !(i.name === itemName && Number(i.price) === Number(itemPrice)));
+  syncCartItemToDatabase(itemName, itemPrice, 0);
   saveCart();
   updateCartBadge();
   renderCartItems();
@@ -958,6 +1006,9 @@ function addToCart(amount = 1, itemName = null, itemPrice = 0) {
   } else if (amount > 0) {
     cartItems.push({ name: normalizedName, price, quantity: amount });
   }
+
+  const finalQuantity = getCartQuantity(normalizedName, price);
+  syncCartItemToDatabase(normalizedName, price, finalQuantity);
 
   saveCart();
   updateCartBadge();
