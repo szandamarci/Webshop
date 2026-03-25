@@ -179,6 +179,83 @@ Webshop csapata
         return False
 
 
+def send_order_confirmation_email(email: str, items: list) -> bool:
+    try:
+        sender = EMAIL_CONFIG['sender_email']
+        password = EMAIL_CONFIG['sender_password']
+
+        safe_items = []
+        total = 0.0
+        for item in items:
+            name = str(item.get('name', '')).strip()
+            quantity = int(item.get('quantity', 0) or 0)
+            price = float(item.get('price', 0) or 0)
+            if not name or quantity <= 0 or price < 0:
+                continue
+            safe_items.append({'name': name, 'quantity': quantity, 'price': price})
+            total += quantity * price
+
+        items_text = '\n'.join(
+            [f"- {it['name']}: {it['quantity']} x {it['price']:.2f} Ft" for it in safe_items]
+        )
+        items_html = ''.join(
+            [
+                f"<li>{it['name']} - {it['quantity']} x {it['price']:.2f} Ft</li>"
+                for it in safe_items
+            ]
+        )
+
+        if not sender or sender == 'your-email@gmail.com' or not password or password == 'your-app-password':
+            print(f"[DEBUG] Email not configured. Would send order confirmation to {email}")
+            return True
+
+        message = MIMEMultipart('alternative')
+        message['Subject'] = 'Webshop - Rendelés visszaigazolás'
+        message['From'] = sender
+        message['To'] = email
+
+        text = f"""
+Köszönjük a rendelésedet!
+
+Rendelés összesítő:
+{items_text if items_text else '-'}
+
+Fizetendő végösszeg: {total:.2f} Ft
+Fizetési mód: Utánvét
+
+Üdvözlettel,
+Webshop csapata
+"""
+
+        html = f"""
+<html>
+  <body>
+    <h2>Köszönjük a rendelésedet!</h2>
+    <p>Rendelés összesítő:</p>
+    <ul>{items_html if items_html else '<li>-</li>'}</ul>
+    <p><strong>Fizetendő végösszeg:</strong> {total:.2f} Ft</p>
+    <p><strong>Fizetési mód:</strong> Utánvét</p>
+    <p>Üdvözlettel,<br>Webshop csapata</p>
+  </body>
+</html>
+"""
+
+        part1 = MIMEText(text, 'plain')
+        part2 = MIMEText(html, 'html')
+        message.attach(part1)
+        message.attach(part2)
+
+        with smtplib.SMTP(EMAIL_CONFIG['smtp_server'], EMAIL_CONFIG['smtp_port']) as server:
+            server.starttls()
+            server.login(sender, password)
+            server.sendmail(sender, email, message.as_string())
+
+        return True
+    except Exception as error:
+        print(f"Order confirmation email send error: {error}")
+        return False
+
+
 def ensure_products_table_exists():
     with get_connection() as conn:
         cursor = conn.cursor()
@@ -208,6 +285,46 @@ def ensure_products_table_exists():
         if 'prod_sale' not in existing_columns:
             cursor.execute("ALTER TABLE Products ADD prod_sale BIT NOT NULL DEFAULT 0")
 
+        conn.commit()
+
+
+def ensure_orders_shipping_type_column_exists():
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(1) FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME='Orders'")
+        has_orders_table = cursor.fetchone()[0] > 0
+        if not has_orders_table:
+            return
+
+        cursor.execute(
+            """
+            IF NOT EXISTS (
+                SELECT 1
+                FROM INFORMATION_SCHEMA.COLUMNS
+                WHERE TABLE_NAME='Orders' AND COLUMN_NAME='shipping_type'
+            )
+            BEGIN
+                ALTER TABLE [Orders] ADD shipping_type NVARCHAR(50) NULL;
+            END
+            """
+        )
+
+        cursor.execute(
+            "SELECT COUNT(1) FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME='Orders' AND COLUMN_NAME='shipping_method'"
+        )
+        has_legacy_shipping_method = cursor.fetchone()[0] > 0
+
+        # SQL Server validates column names at parse time, so we only run this
+        # statement when the legacy column actually exists.
+        if has_legacy_shipping_method:
+            cursor.execute(
+                """
+                UPDATE [Orders]
+                SET shipping_type = shipping_method
+                WHERE (shipping_type IS NULL OR LTRIM(RTRIM(shipping_type)) = '')
+                  AND shipping_method IS NOT NULL;
+                """
+            )
         conn.commit()
 
 
@@ -397,6 +514,95 @@ def get_products(category: str = None) -> list:
     return products
 
 
+def format_datetime_for_json(value):
+    if value is None:
+        return None
+
+    if isinstance(value, datetime):
+        return value.isoformat()
+
+    return str(value)
+
+
+def get_orders_columns(cursor):
+    cursor.execute(
+        """
+        SELECT COLUMN_NAME
+        FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_NAME='Orders'
+        ORDER BY ORDINAL_POSITION
+        """
+    )
+    ordered_columns = [row[0] for row in cursor.fetchall()]
+    existing_columns = {name.lower() for name in ordered_columns}
+
+    return {
+        'ordered': ordered_columns,
+        'existing': existing_columns,
+        'id': 'order_id' if 'order_id' in existing_columns else ('id' if 'id' in existing_columns else None),
+        'cart_id': 'cart_id' if 'cart_id' in existing_columns else None,
+        'user_id': 'user_id' if 'user_id' in existing_columns else None,
+        'address': 'address' if 'address' in existing_columns else None,
+        'order_date': 'order_date' if 'order_date' in existing_columns else None,
+        'shipping_date': 'shipping_date' if 'shipping_date' in existing_columns else None,
+        'order_state': 'order_state' if 'order_state' in existing_columns else None,
+        'payment_type': 'payment_type' if 'payment_type' in existing_columns else None,
+        'shipping_type': 'shipping_type' if 'shipping_type' in existing_columns else None,
+        'payed': 'payed' if 'payed' in existing_columns else None,
+    }
+
+
+def get_admin_orders() -> list:
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(1) FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME='Orders'")
+        has_orders_table = cursor.fetchone()[0] > 0
+        if not has_orders_table:
+            return []
+
+        cols = get_orders_columns(cursor)
+        ordered_columns = cols.get('ordered', [])
+        if not ordered_columns:
+            return []
+
+        select_parts = [f"o.[{column}] AS [{column}]" for column in ordered_columns]
+
+        order_by_parts = []
+        if cols['shipping_date']:
+            order_by_parts.extend(
+                [
+                    f"CASE WHEN o.[{cols['shipping_date']}] IS NULL THEN 1 ELSE 0 END",
+                    f"o.[{cols['shipping_date']}] ASC",
+                ]
+            )
+        if cols['order_date']:
+            order_by_parts.append(f"o.[{cols['order_date']}] ASC")
+        if not order_by_parts:
+            order_by_parts.append(f"o.[{ordered_columns[0]}] ASC")
+
+        query = f"""
+            SELECT {', '.join(select_parts)}
+            FROM [Orders] o
+            ORDER BY {', '.join(order_by_parts)}
+        """
+
+        cursor.execute(query)
+        column_names = [column[0] for column in cursor.description]
+        rows = cursor.fetchall()
+
+    orders = []
+    for row in rows:
+        record = dict(zip(column_names, row))
+
+        serialized_record = {}
+        for key, value in record.items():
+            serialized_record[key] = format_datetime_for_json(value)
+
+        orders.append(serialized_record)
+
+    return orders
+
+
 @app.route('/create-payment/barion', methods=['POST'])
 def create_barion_payment_endpoint():
     data = request.get_json(force=True, silent=True) or {}
@@ -515,6 +721,90 @@ def payment_state_barion_endpoint(payment_id: str):
         return jsonify({'success': False, 'details': payment_state}), 502
 
     return jsonify({'success': True, 'state': payment_state}), 200
+
+
+@app.route('/orders/afterpay/confirm', methods=['POST'])
+def confirm_afterpay_order_endpoint():
+    data = request.get_json(force=True, silent=True) or {}
+
+    email = str(data.get('email', '')).strip().lower()
+    user_email = str(data.get('userEmail', '')).strip().lower()
+    address = str(data.get('address', '')).strip()
+    payment_type = str(data.get('paymentType', 'Utánvét')).strip() or 'Utánvét'
+    shipping_type = str(data.get('shippingMethod', 'standard')).strip().lower() or 'standard'
+    order_state = str(data.get('orderState', 'Rögzítve')).strip() or 'Rögzítve'
+    payed = parse_bool(data.get('payed', False), default=False)
+    cart_id_input = data.get('cartId', None)
+    items = data.get('items', [])
+
+    if not email:
+        return jsonify({'success': False, 'error': 'Email megadása kötelező.'}), 400
+
+    if not address:
+        return jsonify({'success': False, 'error': 'Cím megadása kötelező.'}), 400
+
+    if not isinstance(items, list) or not items:
+        return jsonify({'success': False, 'error': 'A kosár üres vagy érvénytelen.'}), 400
+
+    owner_email = user_email if user_email else email
+
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        ensure_users_table_exists()
+        ensure_orders_shipping_type_column_exists()
+
+        cursor.execute("SELECT user_id FROM Users WHERE LOWER(user_email) = LOWER(?)", (owner_email,))
+        user_row = cursor.fetchone()
+        if not user_row:
+            return jsonify({'success': False, 'error': 'A rendelés mentéséhez bejelentkezett felhasználó szükséges.'}), 400
+
+        user_id = int(user_row[0])
+
+        try:
+            cart_id = int(cart_id_input) if cart_id_input is not None else 0
+        except (TypeError, ValueError):
+            cart_id = 0
+
+        if cart_id <= 0:
+            cursor.execute("SELECT ISNULL(MAX(cart_id), 0) + 1 FROM [Orders]")
+            cart_id = int(cursor.fetchone()[0])
+
+        order_date = datetime.now()
+        shipping_date = order_date + timedelta(days=3)
+        payed_bit = 1 if payed else 0
+
+        cursor.execute(
+            """
+            INSERT INTO [Orders] (cart_id, user_id, address, order_date, shipping_date, order_state, payment_type, shipping_type, payed)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (cart_id, user_id, address, order_date, shipping_date, order_state, payment_type, shipping_type, payed_bit)
+        )
+        cursor.execute("SELECT CAST(SCOPE_IDENTITY() AS INT)")
+        order_id_row = cursor.fetchone()
+        order_id = int(order_id_row[0]) if order_id_row and order_id_row[0] is not None else None
+        conn.commit()
+
+    sent = send_order_confirmation_email(email, items)
+    if not sent:
+        return jsonify({'success': True, 'orderId': order_id, 'emailSent': False, 'warning': 'Rendelés mentve, de a visszaigazoló email küldése sikertelen.'}), 200
+
+    return jsonify({'success': True, 'orderId': order_id, 'emailSent': True}), 200
+
+
+@app.route('/orders/admin', methods=['GET'])
+def admin_orders_endpoint():
+    requester_email = request.args.get('requester_email', '').strip().lower()
+    if not is_admin_email(requester_email):
+        return jsonify({'success': False, 'error': 'Nincs admin jogosultság ehhez a művelethez.'}), 403
+
+    try:
+        orders = get_admin_orders()
+        return jsonify({'success': True, 'orders': orders}), 200
+    except ValueError as error:
+        return jsonify({'success': False, 'error': str(error)}), 500
+    except Exception as error:
+        return jsonify({'success': False, 'error': f'Rendelések betöltése sikertelen: {error}'}), 500
 
 
 def register_user(email: str, password: str, first_name: str = '', last_name: str = '') -> dict:

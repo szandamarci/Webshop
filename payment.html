@@ -51,6 +51,24 @@
                     <label for="billing-country">Ország</label>
                     <input type="text" class="form-control" id="billing-country" required placeholder="Enter country">
                 </div>
+                <h1>Szállítási lehetőségek</h1>
+                <div class="mb-3" style="max-width: 360px;">
+                    <label for="shipping-method-select" class="form-label">Válassz szállítási módot</label>
+                    <select id="shipping-method-select" class="form-select">
+                        <option value="Házhozszállítás" selected>Házhozszállítás</option>
+                        <option value="Személyes átvétel">Személyes átvétel</option>
+                    </select>
+                </div>
+                <div>
+                <h1>Fizetési lehetőségek</h1>
+                <div class="mb-3" style="max-width: 360px;">
+                    <label for="payment-method-select" class="form-label">Válassz fizetési módot</label>
+                    <select id="payment-method-select" class="form-select">
+                        <option value="barion" selected>Barion</option>
+                        <option value="simplepay">SimplePay</option>
+                        <option value="afterpay">Utánvét</option>
+                    </select>
+                </div>
                 <div class="form-check mb-3">
                     <input class="form-check-input" type="checkbox" name="read-terms-and-conditions" id="read-terms-and-conditions" unchecked>
                     <label class="form-check-label" for="read-terms-and-conditions">Az <a href="#" onclick="loadPage('terms'); return false;">Általános Szerződési Feltételeket</a> elolvastam</label>
@@ -61,13 +79,9 @@
                 </div>
             </form>
         </div>
-
-        <h1>Fizetési lehetőségek</h1>
+        
         <div>
-            <button id="pay-barion" type="button" class="btn btn-primary">Fizetés Barion-nal</button>
-        </div>
-        <div class="mt-3">
-            <button id="pay-simplepay" type="button" class="btn btn-outline-secondary" disabled>Fizetés SimplePay-jel (hamarosan)</button>
+            <button id="pay-selected-method" type="button" class="btn btn-primary">Tovább</button>
         </div>
         <p id="payment-status" class="mt-3"></p>
     </body>

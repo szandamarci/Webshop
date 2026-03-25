@@ -1,4 +1,5 @@
 const pageHistory = ['index'];
+const AFTERPAY_CHECKOUT_DATA_KEY = 'afterpayCheckoutData';
 
 function navigateBackPage(fallbackPage = 'index') {
   if (pageHistory.length > 1) {
@@ -98,6 +99,20 @@ async function loadPage(page, options = {}) {
     const html = await response.text();
     content.innerHTML = html;
   }
+  if (page === "payment_afterpay") {
+    const content = document.getElementById("content");
+    const response = await fetch(`${page}.html`);
+    if (!response.ok) throw new Error('Page not found');
+    const html = await response.text();
+    content.innerHTML = html;
+  }
+  if (page === "payment_done") {
+    const content = document.getElementById("content");
+    const response = await fetch(`${page}.html`);
+    if (!response.ok) throw new Error('Page not found');
+    const html = await response.text();
+    content.innerHTML = html;
+  }
   if (page === "admin") {
     const user = getCurrentUser();
     if (!user || !user.isAdmin) {
@@ -122,6 +137,7 @@ async function loadPage(page, options = {}) {
   initMainSearchEvents();
   initSidebarPriceFilter();
   initPaymentPage();
+  initAfterPayPage();
 }
 
 let selectedCategory = null;
@@ -373,6 +389,11 @@ function initMainSearchEvents() {
 
 const CART_KEY = 'webshopCart';
 
+function resetCartOnStartup() {
+  localStorage.removeItem(CART_KEY);
+  return [];
+}
+
 function loadCart() {
   try {
     const raw = localStorage.getItem(CART_KEY);
@@ -388,8 +409,8 @@ function saveCart() {
   localStorage.setItem(CART_KEY, JSON.stringify(cartItems));
 }
 
-let cartItems = loadCart();
-let cartCount = cartItems.reduce((sum, item) => sum + (item.quantity || 1), 0);
+let cartItems = resetCartOnStartup();
+let cartCount = 0;
 
 function updateCartBadge() {
   const badge = document.getElementById("cart-count");
@@ -473,12 +494,10 @@ function hasAcceptedLegalCheckboxes() {
 }
 
 function updatePaymentButtonsState() {
-  const barionButton = document.getElementById('pay-barion');
-  const simplePayButton = document.getElementById('pay-simplepay');
+  const payButton = document.getElementById('pay-selected-method');
   const isAccepted = hasAcceptedLegalCheckboxes();
 
-  if (barionButton) barionButton.disabled = !isAccepted;
-  if (simplePayButton) simplePayButton.disabled = !isAccepted;
+  if (payButton) payButton.disabled = !isAccepted;
 }
 
 function collectBillingFormData() {
@@ -548,7 +567,7 @@ async function startBarionCheckout() {
   const billing = collectBillingFormData();
   if (!billing) return;
 
-  const button = document.getElementById('pay-barion');
+  const button = document.getElementById('pay-selected-method');
   if (button) button.disabled = true;
   showPaymentStatus('Barion fizetés indítása...');
 
@@ -591,6 +610,168 @@ function startSimplePayCheckout(event) {
   }
 
   showPaymentStatus('A SimplePay fizetés hamarosan elérhető lesz.', true);
+}
+
+function startAfterPayCheckout(event) {
+  if (event) event.preventDefault();
+
+  if (!hasAcceptedLegalCheckboxes()) {
+    showPaymentStatus('A fizetéshez fogadd el az ÁSZF-et és az Adatvédelmi Szabályzatot.', true);
+    updatePaymentButtonsState();
+    return;
+  }
+
+  if (!cartItems.length) {
+    showPaymentStatus('A kosár üres, nem indítható fizetés.', true);
+    return;
+  }
+
+  const billing = collectBillingFormData();
+  if (!billing) return;
+
+  const shippingMethodSelect = document.getElementById('shipping-method-select');
+  const shippingMethod = (shippingMethodSelect?.value || 'standard').trim().toLowerCase();
+
+  sessionStorage.setItem(AFTERPAY_CHECKOUT_DATA_KEY, JSON.stringify({ billing, shippingMethod }));
+
+  loadPage('payment_afterpay');
+}
+
+function getAfterPayStatusElement() {
+  return document.getElementById('afterpay-status');
+}
+
+function showAfterPayStatus(message, isError = false) {
+  const status = getAfterPayStatusElement();
+  if (!status) return;
+
+  status.textContent = message;
+  status.className = isError ? 'mt-3 text-danger' : 'mt-3 text-success';
+}
+
+function getAfterPayRecipientEmail() {
+  const currentUser = getCurrentUser();
+  const userEmail = currentUser?.email ? String(currentUser.email).trim() : '';
+  if (userEmail) return userEmail;
+
+  const checkoutData = getAfterPayCheckoutData();
+  const billingEmail = checkoutData?.billing?.email ? String(checkoutData.billing.email).trim() : '';
+  if (billingEmail) return billingEmail;
+
+  return '';
+}
+
+function getAfterPayCheckoutData() {
+  try {
+    const raw = sessionStorage.getItem(AFTERPAY_CHECKOUT_DATA_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch (error) {
+    console.error('AfterPay session data parse error', error);
+    return null;
+  }
+}
+
+async function submitAfterPayOrder(event) {
+  if (event) event.preventDefault();
+
+  const button = document.getElementById('submit-order');
+  if (!button) return;
+
+  if (!cartItems.length) {
+    showAfterPayStatus('A kosár üres, nem adható le rendelés.', true);
+    return;
+  }
+
+  const recipientEmail = getAfterPayRecipientEmail();
+  if (!recipientEmail) {
+    showAfterPayStatus('Nem található email cím a visszaigazoláshoz.', true);
+    return;
+  }
+
+  const checkoutData = getAfterPayCheckoutData();
+  const billing = checkoutData?.billing || {};
+  const shippingMethod = String(checkoutData?.shippingMethod || 'standard').trim().toLowerCase();
+  const address = [billing.zip, billing.city, billing.address, billing.country]
+    .map((value) => String(value || '').trim())
+    .filter(Boolean)
+    .join(', ');
+
+  if (!address) {
+    showAfterPayStatus('Hiányzó számlázási/szállítási cím.', true);
+    return;
+  }
+
+  const currentUser = getCurrentUser();
+  const userEmail = currentUser?.email ? String(currentUser.email).trim() : '';
+
+  button.disabled = true;
+  showAfterPayStatus('Rendelés feldolgozása...');
+
+  try {
+    const response = await fetch('http://localhost:5000/orders/afterpay/confirm', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        email: recipientEmail,
+        userEmail,
+        address,
+        paymentType: 'Utánvét',
+        shippingMethod,
+        payed: false,
+        orderState: 'Rögzítve',
+        items: cartItems
+      })
+    });
+
+    const result = await response.json();
+    if (!response.ok || !result.success) {
+      showAfterPayStatus(result?.error || 'A rendelés mentése sikertelen.', true);
+      return;
+    }
+
+    cartItems = [];
+    saveCart();
+    updateCartBadge();
+    renderCartItems();
+    sessionStorage.removeItem(AFTERPAY_CHECKOUT_DATA_KEY);
+    loadPage('payment_done');
+  } catch (error) {
+    showAfterPayStatus(`Hálózati hiba: ${error.message}`, true);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+function initAfterPayPage() {
+  const submitOrderButton = document.getElementById('submit-order');
+  if (!submitOrderButton) return;
+
+  submitOrderButton.removeEventListener('click', submitAfterPayOrder);
+  submitOrderButton.addEventListener('click', submitAfterPayOrder);
+}
+
+function handleSelectedCheckout(event) {
+  if (event) event.preventDefault();
+
+  const methodSelect = document.getElementById('payment-method-select');
+  const method = (methodSelect?.value || 'barion').toLowerCase();
+
+  if (method === 'barion') {
+    startBarionCheckout();
+    return;
+  }
+
+  if (method === 'simplepay') {
+    startSimplePayCheckout();
+    return;
+  }
+
+  if (method === 'afterpay') {
+    startAfterPayCheckout();
+    return;
+  }
+
+  showPaymentStatus('Ismeretlen fizetési mód.', true);
 }
 
 async function resolveBarionReturn() {
@@ -664,16 +845,16 @@ async function fillBillingFromCurrentUser() {
 }
 
 function initPaymentPage() {
-  const barionButton = document.getElementById('pay-barion');
-  const simplePayButton = document.getElementById('pay-simplepay');
-  if (!barionButton) return;
+  const payButton = document.getElementById('pay-selected-method');
+  const methodSelect = document.getElementById('payment-method-select');
+  if (!payButton) return;
 
-  barionButton.removeEventListener('click', startBarionCheckout);
-  barionButton.addEventListener('click', startBarionCheckout);
+  payButton.removeEventListener('click', handleSelectedCheckout);
+  payButton.addEventListener('click', handleSelectedCheckout);
 
-  if (simplePayButton) {
-    simplePayButton.removeEventListener('click', startSimplePayCheckout);
-    simplePayButton.addEventListener('click', startSimplePayCheckout);
+  if (methodSelect) {
+    methodSelect.removeEventListener('change', clearPaymentStatusOnMethodChange);
+    methodSelect.addEventListener('change', clearPaymentStatusOnMethodChange);
   }
 
   const readTerms = document.getElementById('read-terms-and-conditions');
@@ -694,6 +875,13 @@ function initPaymentPage() {
   renderPaymentSummary();
   resolveBarionReturn();
   fillBillingFromCurrentUser();
+}
+
+function clearPaymentStatusOnMethodChange() {
+  const status = getPaymentStatusElement();
+  if (!status) return;
+  status.textContent = '';
+  status.className = 'mt-3';
 }
 
 function getCartItem(name, price) {
@@ -837,6 +1025,13 @@ function showAdminAddMessage(text, isError = false) {
   el.className = isError ? 'small text-danger' : 'small text-success';
 }
 
+function showAdminOrdersMessage(text, isError = false) {
+  const el = document.getElementById('admin-orders-message');
+  if (!el) return;
+  el.textContent = text;
+  el.className = isError ? 'small text-danger' : 'small text-success';
+}
+
 function escapeHtml(value) {
   return String(value ?? '')
     .replace(/&/g, '&amp;')
@@ -856,6 +1051,196 @@ function getImageFileName(imagePath) {
 }
 
 let adminProductsCache = [];
+let adminOrdersCache = [];
+
+function parseDateSafe(value) {
+  if (!value) return null;
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
+function formatAdminDate(value) {
+  const parsed = parseDateSafe(value);
+  if (!parsed) return '-';
+  return parsed.toLocaleString('hu-HU');
+}
+
+function getOrderUrgencyMeta(shippingDateRaw) {
+  const shippingDate = parseDateSafe(shippingDateRaw);
+  if (!shippingDate) {
+    return {
+      rank: 99,
+      label: 'Ismeretlen',
+      badgeClass: 'secondary',
+      remainingText: '-'
+    };
+  }
+
+  const now = new Date();
+  const dayMs = 24 * 60 * 60 * 1000;
+  const diffMs = shippingDate.getTime() - now.getTime();
+  const daysLeft = Math.ceil(diffMs / dayMs);
+
+  if (diffMs < 0) {
+    const lateDays = Math.max(1, Math.ceil(Math.abs(diffMs) / dayMs));
+    return {
+      rank: 0,
+      label: 'Lejárt',
+      badgeClass: 'danger',
+      remainingText: `${lateDays} nap késés`
+    };
+  }
+
+  if (daysLeft === 0) {
+    return {
+      rank: 1,
+      label: 'Ma esedékes',
+      badgeClass: 'warning text-dark',
+      remainingText: 'Kevesebb mint 1 nap'
+    };
+  }
+
+  if (daysLeft <= 1) {
+    return {
+      rank: 2,
+      label: 'Nagyon sürgős',
+      badgeClass: 'warning text-dark',
+      remainingText: `${daysLeft} nap`
+    };
+  }
+
+  if (daysLeft <= 3) {
+    return {
+      rank: 3,
+      label: 'Sürgős',
+      badgeClass: 'info text-dark',
+      remainingText: `${daysLeft} nap`
+    };
+  }
+
+  return {
+    rank: 4,
+    label: 'Normál',
+    badgeClass: 'success',
+    remainingText: `${daysLeft} nap`
+  };
+}
+
+function formatOrderColumnTitle(key) {
+  return String(key || '')
+    .replace(/_/g, ' ')
+    .replace(/\b\w/g, (ch) => ch.toUpperCase());
+}
+
+function getOrderShippingDateValue(order) {
+  return order?.shipping_date ?? order?.shippingDate ?? null;
+}
+
+function formatAdminOrderCellValue(columnKey, value) {
+  if (value === null || value === undefined || value === '') return '-';
+
+  if (typeof value === 'boolean') {
+    return value ? 'Igen' : 'Nem';
+  }
+
+  const key = String(columnKey || '').toLowerCase();
+  if (key.includes('date')) {
+    const parsed = parseDateSafe(value);
+    if (parsed) {
+      return parsed.toLocaleString('hu-HU');
+    }
+  }
+
+  return String(value);
+}
+
+function setAdminOrdersHeader(columns) {
+  const head = document.getElementById('admin-orders-table-head');
+  if (!head) return;
+
+  const dynamicHeaders = columns.map((column) => `<th>${escapeHtml(formatOrderColumnTitle(column))}</th>`).join('');
+  head.innerHTML = `<tr><th>Prioritás</th>${dynamicHeaders}<th>Hátralévő idő</th></tr>`;
+}
+
+function renderAdminOrdersTable(orders) {
+  const head = document.getElementById('admin-orders-table-head');
+  const body = document.getElementById('admin-orders-table-body');
+  if (!head || !body) return;
+
+  const columns = orders.length ? Object.keys(orders[0]) : [];
+  setAdminOrdersHeader(columns);
+
+  if (!orders.length) {
+    body.innerHTML = '<tr><td colspan="2" class="text-center py-4">Nincsenek rendelések.</td></tr>';
+    return;
+  }
+
+  const sortedOrders = [...orders].sort((a, b) => {
+    const shippingA = getOrderShippingDateValue(a);
+    const shippingB = getOrderShippingDateValue(b);
+    const urgencyA = getOrderUrgencyMeta(shippingA);
+    const urgencyB = getOrderUrgencyMeta(shippingB);
+
+    if (urgencyA.rank !== urgencyB.rank) {
+      return urgencyA.rank - urgencyB.rank;
+    }
+
+    const timeA = parseDateSafe(shippingA)?.getTime() || Number.MAX_SAFE_INTEGER;
+    const timeB = parseDateSafe(shippingB)?.getTime() || Number.MAX_SAFE_INTEGER;
+    return timeA - timeB;
+  });
+
+  body.innerHTML = sortedOrders.map((order) => {
+    const shippingDateValue = getOrderShippingDateValue(order);
+    const urgency = getOrderUrgencyMeta(shippingDateValue);
+    const dynamicCells = columns.map((column) => {
+      const formatted = formatAdminOrderCellValue(column, order[column]);
+      return `<td>${escapeHtml(formatted)}</td>`;
+    }).join('');
+
+    return `
+      <tr>
+        <td><span class="badge bg-${urgency.badgeClass}">${urgency.label}</span></td>
+        ${dynamicCells}
+        <td>${escapeHtml(urgency.remainingText)}</td>
+      </tr>
+    `;
+  }).join('');
+}
+
+async function loadAdminOrders() {
+  const head = document.getElementById('admin-orders-table-head');
+  const body = document.getElementById('admin-orders-table-body');
+  if (!head || !body) return;
+
+  setAdminOrdersHeader([]);
+
+  const requesterEmail = getRequesterEmailForAdmin();
+  if (!requesterEmail) {
+    body.innerHTML = '<tr><td colspan="2" class="text-center text-danger py-4">Nincs bejelentkezett admin felhasználó.</td></tr>';
+    return;
+  }
+
+  body.innerHTML = '<tr><td colspan="2" class="text-center py-4">Rendelések betöltése...</td></tr>';
+
+  try {
+    const res = await fetch(`http://localhost:5000/orders/admin?requester_email=${encodeURIComponent(requesterEmail)}`);
+    const result = await res.json();
+
+    if (!res.ok || !result.success) {
+      body.innerHTML = '<tr><td colspan="2" class="text-center text-danger py-4">Nem sikerült betölteni a rendeléseket.</td></tr>';
+      showAdminOrdersMessage(result?.error || 'Hiba a rendelések lekérésekor.', true);
+      return;
+    }
+
+    adminOrdersCache = result.orders || [];
+    renderAdminOrdersTable(adminOrdersCache);
+    showAdminOrdersMessage(`Összesen ${adminOrdersCache.length} rendelés betöltve.`, false);
+  } catch (error) {
+    body.innerHTML = `<tr><td colspan="2" class="text-center text-danger py-4">Hiba: ${error.message}</td></tr>`;
+    showAdminOrdersMessage(`Hiba: ${error.message}`, true);
+  }
+}
 
 function renderAdminProductsTable(products) {
   const body = document.getElementById('admin-products-table-body');
@@ -1084,6 +1469,7 @@ function initAdminPage() {
   if (!user || !user.isAdmin) return;
 
   const addForm = document.getElementById('admin-add-product-form');
+  const refreshOrdersBtn = document.getElementById('admin-refresh-orders');
   const refreshBtn = document.getElementById('admin-refresh-products');
   const searchInput = document.getElementById('admin-product-search');
 
@@ -1092,7 +1478,13 @@ function initAdminPage() {
     addForm.addEventListener('submit', handleAdminAddProduct);
   }
 
+  if (refreshOrdersBtn) {
+    refreshOrdersBtn.removeEventListener('click', loadAdminOrders);
+    refreshOrdersBtn.addEventListener('click', loadAdminOrders);
+  }
+
   if (refreshBtn) {
+    refreshBtn.removeEventListener('click', loadAdminProducts);
     refreshBtn.addEventListener('click', loadAdminProducts);
   }
 
@@ -1101,6 +1493,7 @@ function initAdminPage() {
     searchInput.addEventListener('input', filterAdminProductsList);
   }
 
+  loadAdminOrders();
   loadAdminProducts();
 }
 
@@ -1114,6 +1507,7 @@ document.addEventListener("DOMContentLoaded", () => {
   initMainSearchEvents();
   initSidebarPriceFilter();
   initPaymentPage();
+  initAfterPayPage();
 });
 
 async function handleRegister(event) {
